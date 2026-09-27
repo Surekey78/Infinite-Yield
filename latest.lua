@@ -14,7 +14,7 @@ if not game:IsLoaded() then
 	notLoaded:Destroy()
 end
 
-currentVersion = '5.9.3'
+currentVersion = '5.9.4'
 
 Players = game:GetService("Players")
 
@@ -188,6 +188,398 @@ text1 = {}
 text2 = {}
 scroll = {}
 
+-- ============================================================================
+-- IY Interface: UI / UX / Accessibility layer
+-- Central helpers for focus visibility, hit targets, contrast, motion safety
+-- and keyboard/touch operation. Everything here is defensive (pcall-guarded)
+-- so it can never break command execution on older clients.
+-- Accessibility prefs (uiScale, reduceMotion, highContrast) are persisted to
+-- IY_FE.iy alongside the existing theme settings. See README accessibility
+-- section for the full audit notes.
+-- ============================================================================
+IY_A11y = {
+	uiScale = 1, -- 0.85 - 1.4
+	reduceMotion = false, -- skips tweens + intro animation
+	highContrast = false, -- high-contrast theme preset
+}
+IY_FocusColor = Color3.fromRGB(91, 192, 248)
+IY_ScaledRoots = {}
+IY_HighContrastCache = nil
+IY_VisibleCmds = {}
+IY_SelectedIndex = 0
+IY_SelectedRow = nil
+IY_RowHighlight = nil
+
+-- Harden the root ScreenGui when we own it (ordering, no reset, safe insets)
+pcall(function()
+	if PARENT ~= nil and PARENT:IsA("ScreenGui") then
+		PARENT.DisplayOrder = 999
+		PARENT.ResetOnSpawn = false
+		PARENT.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		PARENT.IgnoreGuiInset = true
+		PARENT.AutoLocalize = false
+		pcall(function() PARENT.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets end)
+	end
+end)
+
+-- Instant-apply when reduced motion is on, otherwise a normal tween
+function IY_CreateTween(gui, tweenInfo, props)
+	if IY_A11y.reduceMotion then
+		pcall(function()
+			for prop, val in pairs(props) do gui[prop] = val end
+		end)
+		return { Play = function() end }
+	end
+	local ok, tween = pcall(function()
+		return game:GetService("TweenService"):Create(gui, tweenInfo, props)
+	end)
+	if ok and tween then return tween end
+	return { Play = function() end }
+end
+
+function IY_SafeTweenPosition(gui, pos, ...)
+	local args = { ... }
+	if IY_A11y.reduceMotion then
+		pcall(function() gui.Position = pos end)
+		return
+	end
+	pcall(function() gui:TweenPosition(pos, unpack(args)) end)
+end
+
+function IY_AddCorner(gui, radius)
+	pcall(function()
+		if gui:FindFirstChildOfClass("UICorner") then return end
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(0, radius or 6)
+		c.Parent = gui
+	end)
+end
+
+function IY_AddStroke(gui, color, thickness, transparency)
+	pcall(function()
+		local s = Instance.new("UIStroke")
+		s.Color = color or Color3.fromRGB(120, 120, 125)
+		s.Thickness = thickness or 1
+		s.Transparency = transparency == nil and 0.55 or transparency
+		s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		s.Parent = gui
+	end)
+end
+
+function IY_AddPadding(gui, left, right)
+	pcall(function()
+		if gui:FindFirstChildOfClass("UIPadding") then return end
+		local p = Instance.new("UIPadding")
+		p.PaddingLeft = UDim.new(0, left or 8)
+		p.PaddingRight = UDim.new(0, right or 8)
+		p.Parent = gui
+	end)
+end
+
+-- Visible keyboard/gamepad focus + hover feedback for buttons.
+-- Never rely on color alone: the focus ring + AutoButtonColor press state
+-- always accompany any tint change.
+function IY_MakeButtonAccessible(btn, accessibleLabel)
+	if btn == nil then return end
+	pcall(function()
+		btn.AutoButtonColor = true
+		btn.Selectable = true
+		btn.AutoLocalize = false
+		if accessibleLabel then btn:SetAttribute("AccessibleLabel", accessibleLabel) end
+		local ring = btn:FindFirstChild("IY_FocusRing")
+		if not ring then
+			ring = Instance.new("UIStroke")
+			ring.Name = "IY_FocusRing"
+			ring.Color = IY_FocusColor
+			ring.Thickness = 2
+			ring.Transparency = 1
+			ring.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			ring.Parent = btn
+		end
+		local function showFocus() ring.Color = IY_FocusColor ring.Transparency = 0 end
+		local function hideFocus() ring.Transparency = 1 end
+		btn.SelectionGained:Connect(showFocus)
+		btn.SelectionLost:Connect(hideFocus)
+		btn.MouseEnter:Connect(showFocus)
+		btn.MouseLeave:Connect(hideFocus)
+	end)
+end
+
+-- Same idea for text inputs: the ring follows keyboard focus, not just hover
+function IY_MakeInputAccessible(box, accessibleLabel)
+	if box == nil then return end
+	pcall(function()
+		box.Selectable = true
+		box.AutoLocalize = false
+		if accessibleLabel then box:SetAttribute("AccessibleLabel", accessibleLabel) end
+		local ring = box:FindFirstChild("IY_FocusRing")
+		if not ring then
+			ring = Instance.new("UIStroke")
+			ring.Name = "IY_FocusRing"
+			ring.Color = IY_FocusColor
+			ring.Thickness = 2
+			ring.Transparency = 1
+			ring.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+			ring.Parent = box
+		end
+		local function showFocus() ring.Color = IY_FocusColor ring.Transparency = 0 end
+		local function hideFocus()
+			if not box:IsFocused() then ring.Transparency = 1 end
+		end
+		box.Focused:Connect(showFocus)
+		box.FocusLost:Connect(hideFocus)
+		box.SelectionGained:Connect(showFocus)
+		box.SelectionLost:Connect(hideFocus)
+		box.MouseEnter:Connect(showFocus)
+		box.MouseLeave:Connect(hideFocus)
+	end)
+end
+
+-- Hover tooltip for icon-only buttons (also picked up by checkTT)
+function IY_SetTip(gui, title, desc)
+	pcall(function()
+		gui:SetAttribute("IY_TipTitle", title)
+		gui:SetAttribute("IY_TipDesc", desc or "")
+	end)
+end
+
+function IY_SetPlaceholder(box, text)
+	if box == nil then return end
+	pcall(function()
+		box.PlaceholderText = text
+		box.PlaceholderColor3 = Color3.fromRGB(175, 175, 180)
+		box.ClearTextOnFocus = false
+		box.AutoLocalize = false
+	end)
+end
+
+-- Touch-friendly scrolling: thicker visible scrollbar, vertical only
+function IY_ApplyScrollA11y(frame, thickness)
+	if frame == nil then return end
+	pcall(function()
+		frame.ScrollBarThickness = thickness or 12
+		frame.ScrollingDirection = Enum.ScrollingDirection.Y
+		frame.ScrollBarImageTransparency = 0
+		frame.VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar
+		frame.Selectable = true
+		pcall(function() frame.ElasticBehavior = Enum.ElasticBehavior.WhenScrollable end)
+	end)
+end
+
+function IY_RegisterScaledRoot(gui)
+	if gui == nil then return end
+	pcall(function()
+		local scale = gui:FindFirstChildOfClass("UIScale")
+		if not scale then
+			scale = Instance.new("UIScale")
+			scale.Parent = gui
+		end
+		scale.Scale = IY_A11y.uiScale
+		IY_ScaledRoots[gui] = scale
+	end)
+end
+
+function IY_ApplyUIScale()
+	for gui, scale in pairs(IY_ScaledRoots) do
+		pcall(function()
+			if gui.Parent ~= nil then scale.Scale = IY_A11y.uiScale end
+		end)
+	end
+end
+
+function IY_SetUIScale(value)
+	IY_A11y.uiScale = math.clamp(value or 1, 0.85, 1.4)
+	IY_ApplyUIScale()
+	if type(updatesaves) == "function" then pcall(updatesaves) end
+end
+
+function IY_SetReduceMotion(value)
+	IY_A11y.reduceMotion = value and true or false
+	if type(updatesaves) == "function" then pcall(updatesaves) end
+end
+
+function IY_SetHighContrast(value)
+	IY_A11y.highContrast = value and true or false
+	if type(updateColors) ~= "function" then
+		if type(updatesaves) == "function" then pcall(updatesaves) end
+		return
+	end
+	if IY_A11y.highContrast then
+		IY_HighContrastCache = {
+			shade1 = currentShade1, shade2 = currentShade2, shade3 = currentShade3,
+			text1 = currentText1, text2 = currentText2, scroll = currentScroll,
+		}
+		IY_ApplyingPreset = true
+		updateColors(Color3.fromRGB(0, 0, 0), shade1)
+		updateColors(Color3.fromRGB(24, 24, 26), shade2)
+		updateColors(Color3.fromRGB(240, 240, 240), shade3)
+		updateColors(Color3.fromRGB(255, 255, 255), text1)
+		updateColors(Color3.fromRGB(0, 0, 0), text2)
+		updateColors(Color3.fromRGB(255, 210, 63), scroll)
+		IY_ApplyingPreset = false
+		IY_FocusColor = Color3.fromRGB(255, 210, 63)
+	else
+		local cache = IY_HighContrastCache
+		IY_FocusColor = Color3.fromRGB(91, 192, 248)
+		if cache ~= nil then
+			updateColors(cache.shade1, shade1)
+			updateColors(cache.shade2, shade2)
+			updateColors(cache.text1, text1)
+			updateColors(cache.shade3, shade3)
+			updateColors(cache.text2, text2)
+			updateColors(cache.scroll, scroll)
+		end
+	end
+	if type(updatesaves) == "function" then pcall(updatesaves) end
+end
+
+-- Clamp a popup rect inside the current viewport so tooltips and dialogs
+-- never render half off-screen on small windows / mobile.
+function IY_ClampPopup(x, y, w, h)
+	local vx, vy = 1024, 768
+	pcall(function()
+		local cam = workspace.CurrentCamera
+		if cam then vx, vy = cam.ViewportSize.X, cam.ViewportSize.Y end
+	end)
+	x = math.clamp(x, 4, math.max(4, vx - w - 4))
+	y = math.clamp(y, 4, math.max(4, vy - h - 4))
+	return x, y
+end
+
+-- ON/OFF toggles always show a text label (never color/transparency alone)
+function IY_SetToggleVisual(toggleBtn, isOn)
+	if toggleBtn == nil then return end
+	pcall(function()
+		if isOn then
+			toggleBtn.Text = "ON"
+			toggleBtn.BackgroundColor3 = Color3.fromRGB(43, 122, 64)
+			toggleBtn.BackgroundTransparency = 0
+			toggleBtn.TextColor3 = Color3.new(1, 1, 1)
+		else
+			toggleBtn.Text = "OFF"
+			toggleBtn.BackgroundColor3 = Color3.fromRGB(70, 70, 74)
+			toggleBtn.BackgroundTransparency = 0
+			toggleBtn.TextColor3 = Color3.fromRGB(235, 235, 238)
+		end
+	end)
+end
+
+-- Command-list rows: hover wash + shared selection ring (one UIStroke total,
+-- reparented to the selected row instead of cloning strokes per row).
+function IY_StyleCommandRow(btn)
+	if btn == nil then return end
+	pcall(function()
+		btn.AutoButtonColor = true
+		btn.Selectable = true
+		btn.AutoLocalize = false
+		btn.TextTruncate = Enum.TextTruncate.AtEnd
+		btn.MouseEnter:Connect(function()
+			if btn:GetAttribute("IY_Selected") ~= true and btn:GetAttribute("IY_Disabled") ~= true then
+				btn.BackgroundColor3 = Color3.new(1, 1, 1)
+				btn.BackgroundTransparency = 0.86
+			end
+		end)
+		btn.MouseLeave:Connect(function()
+			if btn:GetAttribute("IY_Selected") ~= true then
+				btn.BackgroundTransparency = 1
+			end
+		end)
+		btn.SelectionGained:Connect(function()
+			if btn:GetAttribute("IY_Disabled") ~= true and btn.Visible then
+				IY_SetSelectedRow(btn, false)
+			end
+		end)
+	end)
+end
+
+function IY_ClearSelectedRow()
+	if IY_SelectedRow ~= nil then
+		pcall(function()
+			IY_SelectedRow:SetAttribute("IY_Selected", false)
+			IY_SelectedRow.BackgroundTransparency = 1
+		end)
+	end
+	if IY_RowHighlight ~= nil then
+		pcall(function() IY_RowHighlight.Parent = nil end)
+	end
+	IY_SelectedRow = nil
+	IY_SelectedIndex = 0
+end
+
+function IY_SetSelectedRow(btn, scrollIntoView)
+	IY_ClearSelectedRow()
+	if btn == nil then return end
+	pcall(function()
+		btn:SetAttribute("IY_Selected", true)
+		btn.BackgroundColor3 = Color3.new(1, 1, 1)
+		btn.BackgroundTransparency = 0.78
+		if IY_RowHighlight == nil then
+			IY_RowHighlight = Instance.new("UIStroke")
+			IY_RowHighlight.Name = "IY_RowHighlight"
+			IY_RowHighlight.Thickness = 2
+			IY_RowHighlight.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		end
+		IY_RowHighlight.Color = IY_FocusColor
+		IY_RowHighlight.Parent = btn
+		IY_SelectedRow = btn
+		for i, v in ipairs(IY_VisibleCmds) do
+			if v == btn then IY_SelectedIndex = i break end
+		end
+	end)
+	if scrollIntoView ~= false then IY_ScrollRowIntoView(btn) end
+	-- Mirror the tooltip for keyboard/gamepad users (no mouse hover)
+	pcall(function()
+		if btn:GetAttribute("Title") ~= nil then IY_ShowTooltipFor(btn) end
+	end)
+end
+
+function IY_ScrollRowIntoView(btn)
+	pcall(function()
+		if CMDsF == nil or btn == nil then return end
+		local relY = btn.AbsolutePosition.Y - CMDsF.AbsolutePosition.Y + CMDsF.CanvasPosition.Y
+		local viewH = CMDsF.AbsoluteSize.Y
+		local rowH = btn.AbsoluteSize.Y + 2
+		local top = CMDsF.CanvasPosition.Y
+		local target = top
+		if relY < top then
+			target = math.max(0, relY - 4)
+		elseif relY + rowH > top + viewH then
+			target = math.max(0, relY + rowH - viewH + 4)
+		else
+			return
+		end
+		if IY_A11y.reduceMotion then
+			CMDsF.CanvasPosition = Vector2.new(0, target)
+		else
+			IY_CreateTween(CMDsF, TweenInfo.new(0.15), { CanvasPosition = Vector2.new(0, target) }):Play()
+		end
+	end)
+end
+
+function IY_MoveSelection(delta)
+	if #IY_VisibleCmds == 0 then return false end
+	local nextIndex = IY_SelectedIndex + delta
+	if IY_SelectedIndex == 0 then nextIndex = delta > 0 and 1 or #IY_VisibleCmds end
+	nextIndex = math.clamp(nextIndex, 1, #IY_VisibleCmds)
+	IY_SetSelectedRow(IY_VisibleCmds[nextIndex], true)
+	return true
+end
+
+function IY_UpdateStatusBar(matchCount, totalCount, query)
+	pcall(function()
+		if IY_StatusBar == nil then return end
+		if query ~= nil and query ~= "" then
+			if matchCount == 0 then
+				IY_StatusBar.Text = "No matches for \"" .. query .. "\""
+			else
+				IY_StatusBar.Text = matchCount .. " match" .. (matchCount == 1 and "" or "es") .. " -- Tab: complete | Up/Down: select"
+			end
+		else
+			IY_StatusBar.Text = totalCount .. " commands -- type to search | prefix \"" .. tostring(prefix) .. "\""
+		end
+	end)
+end
+
 Holder.Name = randomString()
 Holder.Parent = PARENT
 Holder.Active = true
@@ -197,6 +589,9 @@ Holder.Position = UDim2.new(1, -250, 1, -220)
 Holder.Size = UDim2.new(0, 250, 0, 220)
 Holder.ZIndex = 10
 table.insert(shade2,Holder)
+IY_AddCorner(Holder, 8)
+IY_AddStroke(Holder, Color3.fromRGB(120, 120, 125), 1, 0.55)
+IY_RegisterScaledRoot(Holder)
 
 Title.Name = "Title"
 Title.Parent = Holder
@@ -206,6 +601,10 @@ Title.BorderSizePixel = 0
 Title.Size = UDim2.new(0, 250, 0, 20)
 Title.Font = Enum.Font.SourceSans
 Title.TextSize = 18
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.TextTruncate = Enum.TextTruncate.AtEnd
+Title.AutoLocalize = false
+Title.Selectable = false
 Title.Text = "Infinite Yield FE v" .. currentVersion
 
 do
@@ -240,6 +639,8 @@ Title.TextColor3 = Color3.new(1, 1, 1)
 Title.ZIndex = 10
 table.insert(shade1,Title)
 table.insert(text1,Title)
+IY_AddPadding(Title, 8, 62)
+IY_SetTip(Title, "Infinite Yield", "Drag to move the window")
 
 Dark.Name = "Dark"
 Dark.Parent = Holder
@@ -247,7 +648,7 @@ Dark.Active = true
 Dark.BackgroundColor3 = Color3.fromRGB(36, 36, 37)
 Dark.BorderSizePixel = 0
 Dark.Position = UDim2.new(0, 0, 0, 45)
-Dark.Size = UDim2.new(0, 250, 0, 175)
+Dark.Size = UDim2.new(0, 250, 0, 155)
 Dark.ZIndex = 10
 table.insert(shade1,Dark)
 
@@ -256,49 +657,103 @@ Cmdbar.Parent = Holder
 Cmdbar.BackgroundTransparency = 1
 Cmdbar.BorderSizePixel = 0
 Cmdbar.Position = UDim2.new(0, 5, 0, 20)
-Cmdbar.Size = UDim2.new(0, 240, 0, 25)
+Cmdbar.Size = UDim2.new(0, 208, 0, 25)
 Cmdbar.Font = Enum.Font.SourceSans
 Cmdbar.TextSize = 18
 Cmdbar.TextXAlignment = Enum.TextXAlignment.Left
 Cmdbar.TextColor3 = Color3.new(1, 1, 1)
 Cmdbar.Text = ""
 Cmdbar.ZIndex = 10
-Cmdbar.PlaceholderText = "Command Bar"
+Cmdbar.PlaceholderText = "Search commands"
+Cmdbar.PlaceholderColor3 = Color3.fromRGB(175, 175, 180)
+Cmdbar.ClearTextOnFocus = false
+Cmdbar.AutoLocalize = false
+
+IY_ClearCmd = Instance.new("TextButton")
+IY_ClearCmd.Name = "IY_ClearCmd"
+IY_ClearCmd.Parent = Holder
+IY_ClearCmd.BackgroundTransparency = 1
+IY_ClearCmd.BorderSizePixel = 0
+IY_ClearCmd.Position = UDim2.new(0, 216, 0, 20)
+IY_ClearCmd.Size = UDim2.new(0, 28, 0, 25)
+IY_ClearCmd.Font = Enum.Font.SourceSansBold
+IY_ClearCmd.TextSize = 20
+IY_ClearCmd.Text = "x"
+IY_ClearCmd.TextColor3 = Color3.new(1, 1, 1)
+IY_ClearCmd.ZIndex = 10
+IY_ClearCmd.Visible = false
+table.insert(text1, IY_ClearCmd)
+IY_MakeButtonAccessible(IY_ClearCmd, "Clear command bar")
+IY_SetTip(IY_ClearCmd, "Clear", "Clear the command bar")
+IY_ClearCmd.MouseButton1Click:Connect(function()
+	Cmdbar.Text = ""
+	Cmdbar:CaptureFocus()
+end)
 
 CMDsF.Name = "CMDs"
 CMDsF.Parent = Holder
 CMDsF.BackgroundTransparency = 1
 CMDsF.BorderSizePixel = 0
 CMDsF.Position = UDim2.new(0, 5, 0, 45)
-CMDsF.Size = UDim2.new(0, 245, 0, 175)
-CMDsF.ScrollBarImageColor3 = Color3.fromRGB(78,78,79)
+CMDsF.Size = UDim2.new(0, 245, 0, 155)
+CMDsF.ScrollBarImageColor3 = Color3.fromRGB(125,125,130)
 CMDsF.BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 CMDsF.CanvasSize = UDim2.new(0, 0, 0, 0)
 CMDsF.MidImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
-CMDsF.ScrollBarThickness = 8
+CMDsF.ScrollBarThickness = 12
 CMDsF.TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 CMDsF.VerticalScrollBarInset = 'Always'
+CMDsF.ScrollingDirection = Enum.ScrollingDirection.Y
+CMDsF.Selectable = true
 CMDsF.ZIndex = 10
 table.insert(scroll,CMDsF)
+IY_ApplyScrollA11y(CMDsF, 12)
 
 cmdListLayout.Parent = CMDsF
+cmdListLayout.Padding = UDim.new(0, 2)
+cmdListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+-- Persistent status bar: result counts, empty states and keyboard hints
+IY_StatusBar = Instance.new("TextLabel")
+IY_StatusBar.Name = "IY_StatusBar"
+IY_StatusBar.Parent = Holder
+IY_StatusBar.BackgroundColor3 = Color3.fromRGB(36, 36, 37)
+IY_StatusBar.BorderSizePixel = 0
+IY_StatusBar.Position = UDim2.new(0, 0, 0, 200)
+IY_StatusBar.Size = UDim2.new(0, 250, 0, 20)
+IY_StatusBar.Font = Enum.Font.SourceSans
+IY_StatusBar.TextSize = 14
+IY_StatusBar.TextColor3 = Color3.new(1, 1, 1)
+IY_StatusBar.TextXAlignment = Enum.TextXAlignment.Left
+IY_StatusBar.TextTruncate = Enum.TextTruncate.AtEnd
+IY_StatusBar.AutoLocalize = false
+IY_StatusBar.Selectable = false
+IY_StatusBar.Text = "Type to search commands"
+IY_StatusBar.ZIndex = 9
+table.insert(shade1, IY_StatusBar)
+table.insert(text1, IY_StatusBar)
+IY_AddPadding(IY_StatusBar, 8, 8)
 
 SettingsButton.Name = "SettingsButton"
 SettingsButton.Parent = Holder
 SettingsButton.BackgroundTransparency = 1
-SettingsButton.Position = UDim2.new(0, 230, 0, 0)
-SettingsButton.Size = UDim2.new(0, 20, 0, 20)
+SettingsButton.Position = UDim2.new(0, 222, 0, -4)
+SettingsButton.Size = UDim2.new(0, 28, 0, 28)
 SettingsButton.Image = "rbxassetid://1204397029"
 SettingsButton.ZIndex = 10
+IY_MakeButtonAccessible(SettingsButton, "Open settings")
+IY_SetTip(SettingsButton, "Settings", "Open settings, keybinds, aliases and more")
 
 ReferenceButton = Instance.new("ImageButton")
 ReferenceButton.Name = "ReferenceButton"
 ReferenceButton.Parent = Holder
 ReferenceButton.BackgroundTransparency = 1
-ReferenceButton.Position = UDim2.new(0, 212, 0, 2)
-ReferenceButton.Size = UDim2.new(0, 16, 0, 16)
+ReferenceButton.Position = UDim2.new(0, 194, 0, -4)
+ReferenceButton.Size = UDim2.new(0, 28, 0, 28)
 ReferenceButton.Image = "rbxassetid://3523243755"
 ReferenceButton.ZIndex = 10
+IY_MakeButtonAccessible(ReferenceButton, "Open command reference")
+IY_SetTip(ReferenceButton, "Reference", "Open the command reference")
 
 Settings.Name = "Settings"
 Settings.Parent = Holder
@@ -318,9 +773,9 @@ SettingsHolder.BorderSizePixel = 0
 SettingsHolder.Size = UDim2.new(1,0,1,0)
 SettingsHolder.ScrollBarImageColor3 = Color3.fromRGB(78,78,79)
 SettingsHolder.BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
-SettingsHolder.CanvasSize = UDim2.new(0, 0, 0, 235)
+SettingsHolder.CanvasSize = UDim2.new(0, 0, 0, 325)
 SettingsHolder.MidImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
-SettingsHolder.ScrollBarThickness = 8
+SettingsHolder.ScrollBarThickness = 12
 SettingsHolder.TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 SettingsHolder.VerticalScrollBarInset = 'Always'
 SettingsHolder.ZIndex = 10
@@ -391,6 +846,8 @@ function makeSettingsButton(name,iconID,off)
 	label.TextXAlignment = Enum.TextXAlignment.Left
 	table.insert(shade2,button)
 	table.insert(text1,label)
+	IY_AddCorner(button, 4)
+	IY_MakeButtonAccessible(button, name)
 	return button
 end
 
@@ -432,23 +889,24 @@ Button.Name = "Button"
 Button.Parent = StayOpen
 Button.BackgroundColor3 = Color3.fromRGB(78, 78, 79)
 Button.BorderSizePixel = 0
-Button.Position = UDim2.new(1, -20, 0, 0)
-Button.Size = UDim2.new(0, 20, 0, 20)
+Button.Position = UDim2.new(1, -52, 0, 0)
+Button.Size = UDim2.new(0, 52, 0, 20)
 Button.ZIndex = 10
 table.insert(shade3,Button)
 
 On.Name = "On"
 On.Parent = Button
-On.BackgroundColor3 = Color3.fromRGB(150, 150, 151)
-On.BackgroundTransparency = 1
+On.BackgroundColor3 = Color3.fromRGB(70, 70, 74)
+On.BackgroundTransparency = 0
 On.BorderSizePixel = 0
 On.Position = UDim2.new(0, 2, 0, 2)
-On.Size = UDim2.new(0, 16, 0, 16)
-On.Font = Enum.Font.SourceSans
+On.Size = UDim2.new(0, 48, 0, 16)
+On.Font = Enum.Font.SourceSansBold
 On.FontSize = Enum.FontSize.Size14
-On.Text = ""
-On.TextColor3 = Color3.new(0, 0, 0)
+On.Text = "OFF"
+On.TextColor3 = Color3.new(1, 1, 1)
 On.ZIndex = 10
+IY_MakeButtonAccessible(On, "Toggle keep menu open")
 
 Positions = makeSettingsButton("Edit/Goto Waypoints","rbxassetid://5147488592")
 Positions.Position = UDim2.new(0, 5, 0, 145)
@@ -462,6 +920,57 @@ EventBind.Size = UDim2.new(1, -10, 0, 25)
 EventBind.Name = "EventBinds"
 EventBind.Parent = SettingsHolder
 
+-- Accessibility preferences (persisted to IY_FE.iy)
+IY_ScaleButton = makeSettingsButton("UI Scale: 100%","rbxassetid://1204397029")
+IY_ScaleButton.Position = UDim2.new(0, 5, 0, 235)
+IY_ScaleButton.Size = UDim2.new(1, -10, 0, 25)
+IY_ScaleButton.Name = "IY_UIScale"
+IY_ScaleButton.Parent = SettingsHolder
+
+IY_MotionButton = makeSettingsButton("Reduce Motion: Off","rbxassetid://1204397029")
+IY_MotionButton.Position = UDim2.new(0, 5, 0, 265)
+IY_MotionButton.Size = UDim2.new(1, -10, 0, 25)
+IY_MotionButton.Name = "IY_ReduceMotion"
+IY_MotionButton.Parent = SettingsHolder
+
+IY_ContrastButton = makeSettingsButton("High Contrast: Off","rbxassetid://1204397029")
+IY_ContrastButton.Position = UDim2.new(0, 5, 0, 295)
+IY_ContrastButton.Size = UDim2.new(1, -10, 0, 25)
+IY_ContrastButton.Name = "IY_HighContrast"
+IY_ContrastButton.Parent = SettingsHolder
+
+function IY_RefreshA11yButtons()
+	pcall(function()
+		IY_ScaleButton.ButtonLabel.Text = "UI Scale: " .. math.floor(IY_A11y.uiScale * 100) .. "%"
+		IY_MotionButton.ButtonLabel.Text = "Reduce Motion: " .. (IY_A11y.reduceMotion and "On" or "Off")
+		IY_ContrastButton.ButtonLabel.Text = "High Contrast: " .. (IY_A11y.highContrast and "On" or "Off")
+	end)
+end
+
+IY_Scales = {0.85, 1, 1.15, 1.3}
+IY_ScaleButton.MouseButton1Click:Connect(function()
+	local idx = 1
+	for i, v in ipairs(IY_Scales) do
+		if math.abs(v - IY_A11y.uiScale) < 0.01 then idx = i break end
+	end
+	idx = (idx % #IY_Scales) + 1
+	IY_SetUIScale(IY_Scales[idx])
+	IY_RefreshA11yButtons()
+	notify("UI Scale", "Interface scale set to " .. math.floor(IY_Scales[idx] * 100) .. "%")
+end)
+
+IY_MotionButton.MouseButton1Click:Connect(function()
+	IY_SetReduceMotion(not IY_A11y.reduceMotion)
+	IY_RefreshA11yButtons()
+	notify("Reduce Motion", "Reduced motion " .. (IY_A11y.reduceMotion and "enabled" or "disabled"))
+end)
+
+IY_ContrastButton.MouseButton1Click:Connect(function()
+	IY_SetHighContrast(not IY_A11y.highContrast)
+	IY_RefreshA11yButtons()
+	notify("High Contrast", "High contrast theme " .. (IY_A11y.highContrast and "enabled" or "disabled"))
+end)
+
 Plugins = makeSettingsButton("Manage Plugins","rbxassetid://5147695474",743)
 Plugins.Position = UDim2.new(0, 5, 0, 175)
 Plugins.Size = UDim2.new(1, -10, 0, 25)
@@ -472,13 +981,17 @@ Example.Name = "Example"
 Example.Parent = Holder
 Example.BackgroundTransparency = 1
 Example.BorderSizePixel = 0
-Example.Size = UDim2.new(0, 190, 0, 20)
+Example.Size = UDim2.new(0, 190, 0, 26)
 Example.Visible = false
 Example.Font = Enum.Font.SourceSans
 Example.TextSize = 18
 Example.Text = "Example"
 Example.TextColor3 = Color3.new(1, 1, 1)
 Example.TextXAlignment = Enum.TextXAlignment.Left
+Example.TextTruncate = Enum.TextTruncate.AtEnd
+Example.AutoLocalize = false
+Example.AutoButtonColor = true
+Example.Selectable = true
 Example.ZIndex = 10
 table.insert(text1,Example)
 
@@ -490,87 +1003,115 @@ Notification.Position = UDim2.new(1, -500, 1, 20)
 Notification.Size = UDim2.new(0, 250, 0, 100)
 Notification.ZIndex = 10
 table.insert(shade1,Notification)
+IY_AddCorner(Notification, 8)
+IY_AddStroke(Notification, Color3.fromRGB(120, 120, 125), 1, 0.55)
+IY_RegisterScaledRoot(Notification)
 
 Title_2.Name = "Title"
 Title_2.Parent = Notification
 Title_2.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Title_2.BorderSizePixel = 0
-Title_2.Size = UDim2.new(0, 250, 0, 20)
-Title_2.Font = Enum.Font.SourceSans
-Title_2.TextSize = 14
+Title_2.Size = UDim2.new(0, 250, 0, 28)
+Title_2.Font = Enum.Font.SourceSansBold
+Title_2.TextSize = 15
+Title_2.TextXAlignment = Enum.TextXAlignment.Left
+Title_2.TextTruncate = Enum.TextTruncate.AtEnd
+Title_2.AutoLocalize = false
 Title_2.Text = "Notification Title"
 Title_2.TextColor3 = Color3.new(1, 1, 1)
 Title_2.ZIndex = 10
 table.insert(shade2,Title_2)
 table.insert(text1,Title_2)
+IY_AddPadding(Title_2, 32, 32)
 
 Text_2.Name = "Text"
 Text_2.Parent = Notification
 Text_2.BackgroundTransparency = 1
 Text_2.BorderSizePixel = 0
-Text_2.Position = UDim2.new(0, 5, 0, 25)
-Text_2.Size = UDim2.new(0, 240, 0, 75)
+Text_2.Position = UDim2.new(0, 5, 0, 32)
+Text_2.Size = UDim2.new(0, 240, 0, 60)
 Text_2.Font = Enum.Font.SourceSans
 Text_2.TextSize = 16
 Text_2.Text = "Notification Text"
 Text_2.TextColor3 = Color3.new(1, 1, 1)
 Text_2.TextWrapped = true
+Text_2.TextTruncate = Enum.TextTruncate.AtEnd
+Text_2.AutoLocalize = false
 Text_2.ZIndex = 10
 table.insert(text1,Text_2)
+
+IY_NotifyProgress = Instance.new("Frame")
+IY_NotifyProgress.Name = "IY_Progress"
+IY_NotifyProgress.Parent = Notification
+IY_NotifyProgress.BackgroundColor3 = Color3.fromRGB(91, 192, 248)
+IY_NotifyProgress.BorderSizePixel = 0
+IY_NotifyProgress.Position = UDim2.new(0, 8, 0, 94)
+IY_NotifyProgress.Size = UDim2.new(1, -16, 0, 3)
+IY_NotifyProgress.ZIndex = 10
 
 CloseButton.Name = "CloseButton"
 CloseButton.Parent = Notification
 CloseButton.BackgroundTransparency = 1
-CloseButton.Position = UDim2.new(1, -20, 0, 0)
-CloseButton.Size = UDim2.new(0, 20, 0, 20)
+CloseButton.Position = UDim2.new(1, -28, 0, 0)
+CloseButton.Size = UDim2.new(0, 28, 0, 28)
 CloseButton.Text = ""
 CloseButton.ZIndex = 10
+IY_MakeButtonAccessible(CloseButton, "Dismiss notification")
+IY_SetTip(CloseButton, "Dismiss", "Dismiss this notification (Esc)")
 
 CloseImage.Parent = CloseButton
 CloseImage.BackgroundColor3 = Color3.new(1, 1, 1)
 CloseImage.BackgroundTransparency = 1
-CloseImage.Position = UDim2.new(0, 5, 0, 5)
-CloseImage.Size = UDim2.new(0, 10, 0, 10)
+CloseImage.Position = UDim2.new(0, 7, 0, 7)
+CloseImage.Size = UDim2.new(0, 14, 0, 14)
 CloseImage.Image = "rbxassetid://5054663650"
 CloseImage.ZIndex = 10
 
 PinButton.Name = "PinButton"
 PinButton.Parent = Notification
 PinButton.BackgroundTransparency = 1
-PinButton.Size = UDim2.new(0, 20, 0, 20)
+PinButton.Position = UDim2.new(0, 0, 0, 0)
+PinButton.Size = UDim2.new(0, 28, 0, 28)
 PinButton.ZIndex = 10
 PinButton.Text = ""
+IY_MakeButtonAccessible(PinButton, "Pin notification")
+IY_SetTip(PinButton, "Pin", "Keep this notification on screen")
 
 PinImage.Parent = PinButton
 PinImage.BackgroundColor3 = Color3.new(1, 1, 1)
 PinImage.BackgroundTransparency = 1
-PinImage.Position = UDim2.new(0, 3, 0, 3)
-PinImage.Size = UDim2.new(0, 14, 0, 14)
+PinImage.Position = UDim2.new(0, 6, 0, 6)
+PinImage.Size = UDim2.new(0, 16, 0, 16)
 PinImage.ZIndex = 10
 PinImage.Image = "rbxassetid://6234691350"
 
 Tooltip.Name = randomString()
 Tooltip.Parent = PARENT
-Tooltip.Active = true
-Tooltip.BackgroundColor3 = Color3.fromRGB(36, 36, 37)
-Tooltip.BackgroundTransparency = 0.1
+Tooltip.Active = false
+Tooltip.BackgroundColor3 = Color3.fromRGB(30, 30, 32)
+Tooltip.BackgroundTransparency = 0
 Tooltip.BorderSizePixel = 0
-Tooltip.Size = UDim2.new(0, 200, 0, 96)
+Tooltip.Size = UDim2.new(0, 220, 0, 104)
 Tooltip.Visible = false
 Tooltip.ZIndex = 10
 table.insert(shade1,Tooltip)
+IY_AddCorner(Tooltip, 8)
+IY_AddStroke(Tooltip, Color3.fromRGB(140, 140, 145), 1, 0.35)
+IY_RegisterScaledRoot(Tooltip)
 
 Title_3.Name = "Title"
 Title_3.Parent = Tooltip
 Title_3.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
-Title_3.BackgroundTransparency = 0.1
+Title_3.BackgroundTransparency = 0
 Title_3.BorderSizePixel = 0
-Title_3.Size = UDim2.new(0, 200, 0, 20)
-Title_3.Font = Enum.Font.SourceSans
-Title_3.TextSize = 14
+Title_3.Size = UDim2.new(0, 220, 0, 24)
+Title_3.Font = Enum.Font.SourceSansBold
+Title_3.TextSize = 15
 Title_3.Text = ""
 Title_3.TextColor3 = Color3.new(1, 1, 1)
-Title_3.TextTransparency = 0.1
+Title_3.TextTransparency = 0
+Title_3.TextTruncate = Enum.TextTruncate.AtEnd
+Title_3.AutoLocalize = false
 Title_3.ZIndex = 10
 table.insert(shade2,Title_3)
 table.insert(text1,Title_3)
@@ -579,16 +1120,47 @@ Description.Name = "Description"
 Description.Parent = Tooltip
 Description.BackgroundTransparency = 1
 Description.BorderSizePixel = 0
-Description.Size = UDim2.new(0,180,0,72)
-Description.Position = UDim2.new(0,10,0,18)
+Description.Size = UDim2.new(0,200,0,72)
+Description.Position = UDim2.new(0,10,0,28)
 Description.Font = Enum.Font.SourceSans
 Description.TextSize = 16
 Description.Text = ""
 Description.TextColor3 = Color3.new(1, 1, 1)
-Description.TextTransparency = 0.1
+Description.TextTransparency = 0
 Description.TextWrapped = true
+Description.TextTruncate = Enum.TextTruncate.AtEnd
+Description.AutoLocalize = false
 Description.ZIndex = 10
 table.insert(text1,Description)
+
+-- Shared tooltip presenter: mouse hover (checkTT) and keyboard/gamepad
+-- selection both funnel through here so tooltips are never mouse-only.
+function IY_ShowTooltip(title, desc, x, y)
+	pcall(function()
+		Title_3.Text = title or ""
+		Description.Text = desc or ""
+		local cx, cy = IY_ClampPopup(x or 0, y or 0, 220, 104)
+		Tooltip.Position = UDim2.new(0, cx, 0, cy)
+		Tooltip.Visible = true
+	end)
+end
+
+function IY_ShowTooltipFor(gui)
+	pcall(function()
+		if gui == nil then return end
+		local title = gui:GetAttribute("Title") or gui:GetAttribute("IY_TipTitle")
+		if title == nil then return end
+		local desc = gui:GetAttribute("Desc") or gui:GetAttribute("IY_TipDesc") or ""
+		local gx = gui.AbsolutePosition.X + gui.AbsoluteSize.X + 12
+		local gy = gui.AbsolutePosition.Y
+		local vw = 1024
+		pcall(function() vw = workspace.CurrentCamera.ViewportSize.X end)
+		if gx + 220 > vw then
+			gx = gui.AbsolutePosition.X - 232
+		end
+		IY_ShowTooltip(title, desc, gx, gy)
+	end)
+end
 
 IntroBackground.Name = "IntroBackground"
 IntroBackground.Parent = Holder
@@ -615,10 +1187,14 @@ Credits.BackgroundTransparency = 1
 Credits.BorderSizePixel = 0
 Credits.Position = UDim2.new(0, 0, 0.9, 30)
 Credits.Size = UDim2.new(0, 250, 0, 20)
-Credits.Font = Enum.Font.SourceSansLight
+Credits.Font = Enum.Font.SourceSans
 Credits.FontSize = Enum.FontSize.Size18
 Credits.Text = "Edge // Zwolf // Moon // Toon"
 Credits.TextColor3 = Color3.new(1, 1, 1)
+Credits.TextEditable = false
+Credits.ClearTextOnFocus = false
+Credits.Selectable = false
+Credits.AutoLocalize = false
 Credits.ZIndex = 10
 
 KeybindsFrame.Name = "KeybindsFrame"
@@ -635,8 +1211,8 @@ Close.Name = "Close"
 Close.Parent = KeybindsFrame
 Close.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Close.BorderSizePixel = 0
-Close.Position = UDim2.new(0, 205, 0, 150)
-Close.Size = UDim2.new(0, 40, 0, 20)
+Close.Position = UDim2.new(0, 205, 0, 146)
+Close.Size = UDim2.new(0, 40, 0, 24)
 Close.Font = Enum.Font.SourceSans
 Close.TextSize = 14
 Close.Text = "Close"
@@ -649,8 +1225,8 @@ Add.Name = "Add"
 Add.Parent = KeybindsFrame
 Add.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Add.BorderSizePixel = 0
-Add.Position = UDim2.new(0, 5, 0, 150)
-Add.Size = UDim2.new(0, 40, 0, 20)
+Add.Position = UDim2.new(0, 5, 0, 146)
+Add.Size = UDim2.new(0, 40, 0, 24)
 Add.Font = Enum.Font.SourceSans
 Add.TextSize = 14
 Add.Text = "Add"
@@ -663,8 +1239,8 @@ Delete.Name = "Delete"
 Delete.Parent = KeybindsFrame
 Delete.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Delete.BorderSizePixel = 0
-Delete.Position = UDim2.new(0, 50, 0, 150)
-Delete.Size = UDim2.new(0, 40, 0, 20)
+Delete.Position = UDim2.new(0, 50, 0, 146)
+Delete.Size = UDim2.new(0, 40, 0, 24)
 Delete.Font = Enum.Font.SourceSans
 Delete.TextSize = 14
 Delete.Text = "Clear"
@@ -683,7 +1259,7 @@ Holder_2.ScrollBarImageColor3 = Color3.fromRGB(78,78,79)
 Holder_2.BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 Holder_2.CanvasSize = UDim2.new(0, 0, 0, 0)
 Holder_2.MidImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
-Holder_2.ScrollBarThickness = 0
+Holder_2.ScrollBarThickness = 10
 Holder_2.TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 Holder_2.VerticalScrollBarInset = 'Always'
 Holder_2.ZIndex = 10
@@ -692,7 +1268,7 @@ Example_2.Name = "Example"
 Example_2.Parent = KeybindsFrame
 Example_2.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Example_2.BorderSizePixel = 0
-Example_2.Size = UDim2.new(0, 10, 0, 20)
+Example_2.Size = UDim2.new(0, 10, 0, 26)
 Example_2.Visible = false
 Example_2.ZIndex = 10
 table.insert(shade2,Example_2)
@@ -702,7 +1278,7 @@ Text_3.Parent = Example_2
 Text_3.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Text_3.BorderSizePixel = 0
 Text_3.Position = UDim2.new(0, 10, 0, 0)
-Text_3.Size = UDim2.new(0, 240, 0, 20)
+Text_3.Size = UDim2.new(0, 240, 0, 26)
 Text_3.Font = Enum.Font.SourceSans
 Text_3.TextSize = 14
 Text_3.Text = "nom"
@@ -717,7 +1293,7 @@ Delete_2.Parent = Text_3
 Delete_2.BackgroundColor3 = Color3.fromRGB(78, 78, 79)
 Delete_2.BorderSizePixel = 0
 Delete_2.Position = UDim2.new(0, 200, 0, 0)
-Delete_2.Size = UDim2.new(0, 40, 0, 20)
+Delete_2.Size = UDim2.new(0, 40, 0, 26)
 Delete_2.Font = Enum.Font.SourceSans
 Delete_2.TextSize = 14
 Delete_2.Text = "Delete"
@@ -731,7 +1307,8 @@ KeybindEditor.Parent = PARENT
 KeybindEditor.Active = true
 KeybindEditor.BackgroundTransparency = 1
 KeybindEditor.Position = UDim2.new(0.5, -180, 0, -500)
-KeybindEditor.Size = UDim2.new(0, 360, 0, 20)
+KeybindEditor.Size = UDim2.new(0, 360, 0, 28)
+IY_RegisterScaledRoot(KeybindEditor)
 KeybindEditor.ZIndex = 10
 
 background_2.Name = "background"
@@ -739,7 +1316,7 @@ background_2.Parent = KeybindEditor
 background_2.Active = true
 background_2.BackgroundColor3 = Color3.fromRGB(36, 36, 37)
 background_2.BorderSizePixel = 0
-background_2.Position = UDim2.new(0, 0, 0, 20)
+background_2.Position = UDim2.new(0, 0, 0, 28)
 background_2.Size = UDim2.new(0, 360, 0, 185)
 background_2.ZIndex = 10
 table.insert(shade1,background_2)
@@ -904,6 +1481,8 @@ Cmdbar_2.Size = UDim2.new(0, 150, 0, 20)
 Cmdbar_2.ZIndex = 10
 Cmdbar_2.Font = Enum.Font.SourceSans
 Cmdbar_2.PlaceholderText = "Command"
+Cmdbar_2.PlaceholderColor3 = Color3.fromRGB(175, 175, 180)
+Cmdbar_2.ClearTextOnFocus = false
 Cmdbar_2.Text = ""
 Cmdbar_2.TextColor3 = Color3.fromRGB(255, 255, 255)
 Cmdbar_2.TextSize = 14.000
@@ -918,6 +1497,8 @@ Cmdbar_3.Size = UDim2.new(0, 150, 0, 20)
 Cmdbar_3.ZIndex = 10
 Cmdbar_3.Font = Enum.Font.SourceSans
 Cmdbar_3.PlaceholderText = "Command 2"
+Cmdbar_3.PlaceholderColor3 = Color3.fromRGB(175, 175, 180)
+Cmdbar_3.ClearTextOnFocus = false
 Cmdbar_3.Text = ""
 Cmdbar_3.TextColor3 = Color3.fromRGB(255, 255, 255)
 Cmdbar_3.TextSize = 14.000
@@ -942,8 +1523,8 @@ Button_2.Name = "Button"
 Button_2.Parent = CreateToggle
 Button_2.BackgroundColor3 = Color3.fromRGB(78, 78, 79)
 Button_2.BorderSizePixel = 0
-Button_2.Position = UDim2.new(1, -20, 0, 0)
-Button_2.Size = UDim2.new(0, 20, 0, 20)
+Button_2.Position = UDim2.new(1, -52, 0, 0)
+Button_2.Size = UDim2.new(0, 52, 0, 20)
 Button_2.ZIndex = 10
 table.insert(shade3,Button_2)
 
@@ -953,18 +1534,22 @@ On_2.BackgroundColor3 = Color3.fromRGB(150, 150, 151)
 On_2.BackgroundTransparency = 1
 On_2.BorderSizePixel = 0
 On_2.Position = UDim2.new(0, 2, 0, 2)
-On_2.Size = UDim2.new(0, 16, 0, 16)
+On_2.Size = UDim2.new(0, 48, 0, 16)
 On_2.ZIndex = 10
-On_2.Font = Enum.Font.SourceSans
-On_2.Text = ""
-On_2.TextColor3 = Color3.fromRGB(0, 0, 0)
+On_2.Font = Enum.Font.SourceSansBold
+On_2.Text = "OFF"
+On_2.TextColor3 = Color3.new(1, 1, 1)
+On_2.BackgroundColor3 = Color3.fromRGB(70, 70, 74)
+On_2.BackgroundTransparency = 0
 On_2.TextSize = 14.000
+IY_MakeButtonAccessible(On_2, "Toggle create toggle")
 
 shadow_2.Name = "shadow"
 shadow_2.Parent = KeybindEditor
 shadow_2.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 shadow_2.BorderSizePixel = 0
-shadow_2.Size = UDim2.new(0, 360, 0, 20)
+shadow_2.Size = UDim2.new(0, 360, 0, 28)
+IY_AddCorner(shadow_2, 6)
 shadow_2.ZIndex = 10
 table.insert(shade2,shadow_2)
 
@@ -983,16 +1568,18 @@ table.insert(text1,PopupText_2)
 Exit_2.Name = "Exit_2"
 Exit_2.Parent = shadow_2
 Exit_2.BackgroundTransparency = 1
-Exit_2.Position = UDim2.new(1, -20, 0, 0)
-Exit_2.Size = UDim2.new(0, 20, 0, 20)
+Exit_2.Position = UDim2.new(1, -28, 0, 0)
+Exit_2.Size = UDim2.new(0, 28, 0, 28)
+IY_MakeButtonAccessible(Exit_2, "Close keybind editor")
+IY_SetTip(Exit_2, "Close", "Close the keybind editor (Esc)")
 Exit_2.ZIndex = 10
 Exit_2.Text = ""
 
 ExitImage_2.Parent = Exit_2
 ExitImage_2.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 ExitImage_2.BackgroundTransparency = 1
-ExitImage_2.Position = UDim2.new(0, 5, 0, 5)
-ExitImage_2.Size = UDim2.new(0, 10, 0, 10)
+ExitImage_2.Position = UDim2.new(0, 7, 0, 7)
+ExitImage_2.Size = UDim2.new(0, 14, 0, 14)
 ExitImage_2.ZIndex = 10
 ExitImage_2.Image = "rbxassetid://5054663650"
 
@@ -1010,8 +1597,8 @@ Close_3.Name = "Close"
 Close_3.Parent = PositionsFrame
 Close_3.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Close_3.BorderSizePixel = 0
-Close_3.Position = UDim2.new(0, 205, 0, 150)
-Close_3.Size = UDim2.new(0, 40, 0, 20)
+Close_3.Position = UDim2.new(0, 205, 0, 146)
+Close_3.Size = UDim2.new(0, 40, 0, 24)
 Close_3.Font = Enum.Font.SourceSans
 Close_3.TextSize = 14
 Close_3.Text = "Close"
@@ -1024,8 +1611,8 @@ Delete_5.Name = "Delete"
 Delete_5.Parent = PositionsFrame
 Delete_5.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Delete_5.BorderSizePixel = 0
-Delete_5.Position = UDim2.new(0, 50, 0, 150)
-Delete_5.Size = UDim2.new(0, 40, 0, 20)
+Delete_5.Position = UDim2.new(0, 50, 0, 146)
+Delete_5.Size = UDim2.new(0, 40, 0, 24)
 Delete_5.Font = Enum.Font.SourceSans
 Delete_5.TextSize = 14
 Delete_5.Text = "Clear"
@@ -1038,8 +1625,8 @@ Part.Name = "PartGoto"
 Part.Parent = PositionsFrame
 Part.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Part.BorderSizePixel = 0
-Part.Position = UDim2.new(0, 5, 0, 150)
-Part.Size = UDim2.new(0, 40, 0, 20)
+Part.Position = UDim2.new(0, 5, 0, 146)
+Part.Size = UDim2.new(0, 40, 0, 24)
 Part.Font = Enum.Font.SourceSans
 Part.TextSize = 14
 Part.Text = "Part"
@@ -1053,13 +1640,13 @@ Holder_4.Parent = PositionsFrame
 Holder_4.BackgroundTransparency = 1
 Holder_4.BorderSizePixel = 0
 Holder_4.Position = UDim2.new(0, 0, 0, 0)
-Holder_4.Selectable = false
+Holder_4.Selectable = true
 Holder_4.Size = UDim2.new(0, 250, 0, 145)
 Holder_4.ScrollBarImageColor3 = Color3.fromRGB(78,78,79)
 Holder_4.BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 Holder_4.CanvasSize = UDim2.new(0, 0, 0, 0)
 Holder_4.MidImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
-Holder_4.ScrollBarThickness = 0
+Holder_4.ScrollBarThickness = 10
 Holder_4.TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 Holder_4.VerticalScrollBarInset = 'Always'
 Holder_4.ZIndex = 10
@@ -1068,7 +1655,7 @@ Example_4.Name = "Example"
 Example_4.Parent = PositionsFrame
 Example_4.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Example_4.BorderSizePixel = 0
-Example_4.Size = UDim2.new(0, 10, 0, 20)
+Example_4.Size = UDim2.new(0, 10, 0, 26)
 Example_4.Visible = false
 Example_4.Position = UDim2.new(0, 0, 0, -5)
 Example_4.ZIndex = 10
@@ -1079,7 +1666,7 @@ Text_5.Parent = Example_4
 Text_5.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Text_5.BorderSizePixel = 0
 Text_5.Position = UDim2.new(0, 10, 0, 0)
-Text_5.Size = UDim2.new(0, 240, 0, 20)
+Text_5.Size = UDim2.new(0, 240, 0, 26)
 Text_5.Font = Enum.Font.SourceSans
 Text_5.TextSize = 14
 Text_5.Text = "Position"
@@ -1094,7 +1681,7 @@ Delete_6.Parent = Text_5
 Delete_6.BackgroundColor3 = Color3.fromRGB(78, 78, 79)
 Delete_6.BorderSizePixel = 0
 Delete_6.Position = UDim2.new(0, 200, 0, 0)
-Delete_6.Size = UDim2.new(0, 40, 0, 20)
+Delete_6.Size = UDim2.new(0, 40, 0, 26)
 Delete_6.Font = Enum.Font.SourceSans
 Delete_6.TextSize = 14
 Delete_6.Text = "Delete"
@@ -1108,7 +1695,7 @@ TP.Parent = Text_5
 TP.BackgroundColor3 = Color3.fromRGB(78, 78, 79)
 TP.BorderSizePixel = 0
 TP.Position = UDim2.new(0, 155, 0, 0)
-TP.Size = UDim2.new(0, 40, 0, 20)
+TP.Size = UDim2.new(0, 40, 0, 26)
 TP.Font = Enum.Font.SourceSans
 TP.TextSize = 14
 TP.Text = "Goto"
@@ -1131,8 +1718,8 @@ Close_2.Name = "Close"
 Close_2.Parent = AliasesFrame
 Close_2.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Close_2.BorderSizePixel = 0
-Close_2.Position = UDim2.new(0, 205, 0, 150)
-Close_2.Size = UDim2.new(0, 40, 0, 20)
+Close_2.Position = UDim2.new(0, 205, 0, 146)
+Close_2.Size = UDim2.new(0, 40, 0, 24)
 Close_2.Font = Enum.Font.SourceSans
 Close_2.TextSize = 14
 Close_2.Text = "Close"
@@ -1145,8 +1732,8 @@ Delete_3.Name = "Delete"
 Delete_3.Parent = AliasesFrame
 Delete_3.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Delete_3.BorderSizePixel = 0
-Delete_3.Position = UDim2.new(0, 5, 0, 150)
-Delete_3.Size = UDim2.new(0, 40, 0, 20)
+Delete_3.Position = UDim2.new(0, 5, 0, 146)
+Delete_3.Size = UDim2.new(0, 40, 0, 24)
 Delete_3.Font = Enum.Font.SourceSans
 Delete_3.TextSize = 14
 Delete_3.Text = "Clear"
@@ -1165,7 +1752,7 @@ Holder_3.ScrollBarImageColor3 = Color3.fromRGB(78,78,79)
 Holder_3.BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 Holder_3.CanvasSize = UDim2.new(0, 0, 0, 0)
 Holder_3.MidImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
-Holder_3.ScrollBarThickness = 0
+Holder_3.ScrollBarThickness = 10
 Holder_3.TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 Holder_3.VerticalScrollBarInset = 'Always'
 Holder_3.ZIndex = 10
@@ -1174,7 +1761,7 @@ Example_3.Name = "Example"
 Example_3.Parent = AliasesFrame
 Example_3.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Example_3.BorderSizePixel = 0
-Example_3.Size = UDim2.new(0, 10, 0, 20)
+Example_3.Size = UDim2.new(0, 10, 0, 26)
 Example_3.Visible = false
 Example_3.ZIndex = 10
 table.insert(shade2,Example_3)
@@ -1184,7 +1771,7 @@ Text_4.Parent = Example_3
 Text_4.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Text_4.BorderSizePixel = 0
 Text_4.Position = UDim2.new(0, 10, 0, 0)
-Text_4.Size = UDim2.new(0, 240, 0, 20)
+Text_4.Size = UDim2.new(0, 240, 0, 26)
 Text_4.Font = Enum.Font.SourceSans
 Text_4.TextSize = 14
 Text_4.Text = "honk"
@@ -1199,7 +1786,7 @@ Delete_4.Parent = Text_4
 Delete_4.BackgroundColor3 = Color3.fromRGB(78, 78, 79)
 Delete_4.BorderSizePixel = 0
 Delete_4.Position = UDim2.new(0, 200, 0, 0)
-Delete_4.Size = UDim2.new(0, 40, 0, 20)
+Delete_4.Size = UDim2.new(0, 40, 0, 26)
 Delete_4.Font = Enum.Font.SourceSans
 Delete_4.TextSize = 14
 Delete_4.Text = "Delete"
@@ -1222,8 +1809,8 @@ Close_4.Name = "Close"
 Close_4.Parent = PluginsFrame
 Close_4.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Close_4.BorderSizePixel = 0
-Close_4.Position = UDim2.new(0, 205, 0, 150)
-Close_4.Size = UDim2.new(0, 40, 0, 20)
+Close_4.Position = UDim2.new(0, 205, 0, 146)
+Close_4.Size = UDim2.new(0, 40, 0, 24)
 Close_4.Font = Enum.Font.SourceSans
 Close_4.TextSize = 14
 Close_4.Text = "Close"
@@ -1236,8 +1823,8 @@ Add_3.Name = "Add"
 Add_3.Parent = PluginsFrame
 Add_3.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Add_3.BorderSizePixel = 0
-Add_3.Position = UDim2.new(0, 5, 0, 150)
-Add_3.Size = UDim2.new(0, 40, 0, 20)
+Add_3.Position = UDim2.new(0, 5, 0, 146)
+Add_3.Size = UDim2.new(0, 40, 0, 24)
 Add_3.Font = Enum.Font.SourceSans
 Add_3.TextSize = 14
 Add_3.Text = "Add"
@@ -1251,13 +1838,13 @@ Holder_5.Parent = PluginsFrame
 Holder_5.BackgroundTransparency = 1
 Holder_5.BorderSizePixel = 0
 Holder_5.Position = UDim2.new(0, 0, 0, 0)
-Holder_5.Selectable = false
+Holder_5.Selectable = true
 Holder_5.Size = UDim2.new(0, 250, 0, 145)
 Holder_5.ScrollBarImageColor3 = Color3.fromRGB(78,78,79)
 Holder_5.BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 Holder_5.CanvasSize = UDim2.new(0, 0, 0, 0)
 Holder_5.MidImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
-Holder_5.ScrollBarThickness = 0
+Holder_5.ScrollBarThickness = 10
 Holder_5.TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 Holder_5.VerticalScrollBarInset = 'Always'
 Holder_5.ZIndex = 10
@@ -1266,7 +1853,7 @@ Example_5.Name = "Example"
 Example_5.Parent = PluginsFrame
 Example_5.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Example_5.BorderSizePixel = 0
-Example_5.Size = UDim2.new(0, 10, 0, 20)
+Example_5.Size = UDim2.new(0, 10, 0, 26)
 Example_5.Visible = false
 Example_5.ZIndex = 10
 table.insert(shade2,Example_5)
@@ -1276,7 +1863,7 @@ Text_6.Parent = Example_5
 Text_6.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 Text_6.BorderSizePixel = 0
 Text_6.Position = UDim2.new(0, 10, 0, 0)
-Text_6.Size = UDim2.new(0, 240, 0, 20)
+Text_6.Size = UDim2.new(0, 240, 0, 26)
 Text_6.Font = Enum.Font.SourceSans
 Text_6.TextSize = 14
 Text_6.Text = "F4 > Toggle Fly"
@@ -1291,7 +1878,7 @@ Delete_7.Parent = Text_6
 Delete_7.BackgroundColor3 = Color3.fromRGB(78, 78, 79)
 Delete_7.BorderSizePixel = 0
 Delete_7.Position = UDim2.new(0, 200, 0, 0)
-Delete_7.Size = UDim2.new(0, 40, 0, 20)
+Delete_7.Size = UDim2.new(0, 40, 0, 26)
 Delete_7.Font = Enum.Font.SourceSans
 Delete_7.TextSize = 14
 Delete_7.Text = "Delete"
@@ -1306,7 +1893,8 @@ PluginEditor.BorderSizePixel = 0
 PluginEditor.Active = true
 PluginEditor.BackgroundTransparency = 1
 PluginEditor.Position = UDim2.new(0.5, -180, 0, -500)
-PluginEditor.Size = UDim2.new(0, 360, 0, 20)
+PluginEditor.Size = UDim2.new(0, 360, 0, 28)
+IY_RegisterScaledRoot(PluginEditor)
 PluginEditor.ZIndex = 10
 
 background_3.Name = "background"
@@ -1314,7 +1902,7 @@ background_3.Parent = PluginEditor
 background_3.Active = true
 background_3.BackgroundColor3 = Color3.fromRGB(36, 36, 37)
 background_3.BorderSizePixel = 0
-background_3.Position = UDim2.new(0, 0, 0, 20)
+background_3.Position = UDim2.new(0, 0, 0, 28)
 background_3.Size = UDim2.new(0, 360, 0, 160)
 background_3.ZIndex = 10
 table.insert(shade1,background_3)
@@ -1359,7 +1947,10 @@ FileName.Position = UDim2.new(0.028, 0, 0.625, 0)
 FileName.Size = UDim2.new(0, 200, 0, 50)
 FileName.Font = Enum.Font.SourceSans
 FileName.TextSize = 14
-FileName.Text = "Plugin File Name"
+FileName.Text = ""
+FileName.PlaceholderText = "Plugin file name (e.g. myplugin.iy)"
+FileName.PlaceholderColor3 = Color3.fromRGB(175, 175, 180)
+FileName.ClearTextOnFocus = false
 FileName.TextColor3 = Color3.new(1, 1, 1)
 FileName.ZIndex = 10
 table.insert(shade2,FileName)
@@ -1399,7 +1990,8 @@ shadow_3.Name = "shadow"
 shadow_3.Parent = PluginEditor
 shadow_3.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 shadow_3.BorderSizePixel = 0
-shadow_3.Size = UDim2.new(0, 360, 0, 20)
+shadow_3.Size = UDim2.new(0, 360, 0, 28)
+IY_AddCorner(shadow_3, 6)
 shadow_3.ZIndex = 10
 table.insert(shade2,shadow_3)
 
@@ -1418,16 +2010,18 @@ table.insert(text1,PopupText_3)
 Exit_3.Name = "Exit"
 Exit_3.Parent = shadow_3
 Exit_3.BackgroundTransparency = 1
-Exit_3.Position = UDim2.new(1, -20, 0, 0)
-Exit_3.Size = UDim2.new(0, 20, 0, 20)
+Exit_3.Position = UDim2.new(1, -28, 0, 0)
+Exit_3.Size = UDim2.new(0, 28, 0, 28)
+IY_MakeButtonAccessible(Exit_3, "Close plugin editor")
+IY_SetTip(Exit_3, "Close", "Close the plugin editor (Esc)")
 Exit_3.Text = ""
 Exit_3.ZIndex = 10
 
 ExitImage_3.Parent = Exit_3
 ExitImage_3.BackgroundColor3 = Color3.new(1, 1, 1)
 ExitImage_3.BackgroundTransparency = 1
-ExitImage_3.Position = UDim2.new(0, 5, 0, 5)
-ExitImage_3.Size = UDim2.new(0, 10, 0, 10)
+ExitImage_3.Position = UDim2.new(0, 7, 0, 7)
+ExitImage_3.Size = UDim2.new(0, 14, 0, 14)
 ExitImage_3.Image = "rbxassetid://5054663650"
 ExitImage_3.ZIndex = 10
 
@@ -1481,7 +2075,8 @@ ToPartFrame.Parent = PARENT
 ToPartFrame.Active = true
 ToPartFrame.BackgroundTransparency = 1
 ToPartFrame.Position = UDim2.new(0.5, -180, 0, -500)
-ToPartFrame.Size = UDim2.new(0, 360, 0, 20)
+ToPartFrame.Size = UDim2.new(0, 360, 0, 28)
+IY_RegisterScaledRoot(ToPartFrame)
 ToPartFrame.ZIndex = 10
 
 background_4.Name = "background"
@@ -1489,7 +2084,7 @@ background_4.Parent = ToPartFrame
 background_4.Active = true
 background_4.BackgroundColor3 = Color3.fromRGB(36, 36, 37)
 background_4.BorderSizePixel = 0
-background_4.Position = UDim2.new(0, 0, 0, 20)
+background_4.Position = UDim2.new(0, 0, 0, 28)
 background_4.Size = UDim2.new(0, 360, 0, 117)
 background_4.ZIndex = 10
 table.insert(shade1,background_4)
@@ -1557,7 +2152,8 @@ shadow_4.Name = "shadow"
 shadow_4.Parent = ToPartFrame
 shadow_4.BackgroundColor3 = Color3.fromRGB(46, 46, 47)
 shadow_4.BorderSizePixel = 0
-shadow_4.Size = UDim2.new(0, 360, 0, 20)
+shadow_4.Size = UDim2.new(0, 360, 0, 28)
+IY_AddCorner(shadow_4, 6)
 shadow_4.ZIndex = 10
 table.insert(shade2,shadow_4)
 
@@ -1576,16 +2172,18 @@ table.insert(text1,PopupText_5)
 Exit_4.Name = "Exit"
 Exit_4.Parent = shadow_4
 Exit_4.BackgroundTransparency = 1
-Exit_4.Position = UDim2.new(1, -20, 0, 0)
-Exit_4.Size = UDim2.new(0, 20, 0, 20)
+Exit_4.Position = UDim2.new(1, -28, 0, 0)
+Exit_4.Size = UDim2.new(0, 28, 0, 28)
+IY_MakeButtonAccessible(Exit_4, "Close part picker")
+IY_SetTip(Exit_4, "Close", "Close the part picker (Esc)")
 Exit_4.Text = ""
 Exit_4.ZIndex = 10
 
 ExitImage_5.Parent = Exit_4
 ExitImage_5.BackgroundColor3 = Color3.new(1, 1, 1)
 ExitImage_5.BackgroundTransparency = 1
-ExitImage_5.Position = UDim2.new(0, 5, 0, 5)
-ExitImage_5.Size = UDim2.new(0, 10, 0, 10)
+ExitImage_5.Position = UDim2.new(0, 7, 0, 7)
+ExitImage_5.Size = UDim2.new(0, 14, 0, 14)
 ExitImage_5.Image = "rbxassetid://5054663650"
 ExitImage_5.ZIndex = 10
 
@@ -1594,7 +2192,7 @@ logs.Parent = PARENT
 logs.Active = true
 logs.BackgroundTransparency = 1
 logs.Position = UDim2.new(0, 0, 1, 10)
-logs.Size = UDim2.new(0, 338, 0, 20)
+logs.Size = UDim2.new(0, 338, 0, 28)
 logs.ZIndex = 10
 
 shadow.Name = "shadow"
@@ -1602,22 +2200,22 @@ shadow.Parent = logs
 shadow.BackgroundColor3 = Color3.new(0.180392, 0.180392, 0.184314)
 shadow.BorderSizePixel = 0
 shadow.Position = UDim2.new(0, 0, 0.00999999978, 0)
-shadow.Size = UDim2.new(0, 338, 0, 20)
+shadow.Size = UDim2.new(0, 338, 0, 28)
 shadow.ZIndex = 10
 table.insert(shade2,shadow)
 
 Hide.Name = "Hide"
 Hide.Parent = shadow
 Hide.BackgroundTransparency = 1
-Hide.Position = UDim2.new(1, -40, 0, 0)
-Hide.Size = UDim2.new(0, 20, 0, 20)
+Hide.Position = UDim2.new(1, -56, 0, 0)
+Hide.Size = UDim2.new(0, 28, 0, 28)
 Hide.ZIndex = 10
 Hide.Text = ""
 
 ImageLabel.Parent = Hide
 ImageLabel.BackgroundColor3 = Color3.new(1, 1, 1)
 ImageLabel.BackgroundTransparency = 1
-ImageLabel.Position = UDim2.new(0, 3, 0, 3)
+ImageLabel.Position = UDim2.new(0, 7, 0, 7)
 ImageLabel.Size = UDim2.new(0, 14, 0, 14)
 ImageLabel.Image = "rbxassetid://2406617031"
 ImageLabel.ZIndex = 10
@@ -1637,16 +2235,16 @@ table.insert(text1,PopupText)
 Exit.Name = "Exit"
 Exit.Parent = shadow
 Exit.BackgroundTransparency = 1
-Exit.Position = UDim2.new(1, -20, 0, 0)
-Exit.Size = UDim2.new(0, 20, 0, 20)
+Exit.Position = UDim2.new(1, -28, 0, 0)
+Exit.Size = UDim2.new(0, 28, 0, 28)
 Exit.ZIndex = 10
 Exit.Text = ""
 
 ImageLabel_2.Parent = Exit
 ImageLabel_2.BackgroundColor3 = Color3.new(1, 1, 1)
 ImageLabel_2.BackgroundTransparency = 1
-ImageLabel_2.Position = UDim2.new(0, 5, 0, 5)
-ImageLabel_2.Size = UDim2.new(0, 10, 0, 10)
+ImageLabel_2.Position = UDim2.new(0, 7, 0, 7)
+ImageLabel_2.Size = UDim2.new(0, 14, 0, 14)
 ImageLabel_2.Image = "rbxassetid://5054663650"
 ImageLabel_2.ZIndex = 10
 
@@ -1716,12 +2314,12 @@ scroll_2.Name = "scroll"
 scroll_2.Parent = chat
 scroll_2.BackgroundColor3 = Color3.new(0.180392, 0.180392, 0.184314)
 scroll_2.BorderSizePixel = 0
-scroll_2.Position = UDim2.new(0, 5, 0, 25)
-scroll_2.Size = UDim2.new(0, 328, 0, 190)
+scroll_2.Position = UDim2.new(0, 5, 0, 34)
+scroll_2.Size = UDim2.new(0, 328, 0, 181)
 scroll_2.ZIndex = 10
 scroll_2.BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 scroll_2.CanvasSize = UDim2.new(0, 0, 0, 10)
-scroll_2.ScrollBarThickness = 8
+scroll_2.ScrollBarThickness = 12
 scroll_2.TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 table.insert(scroll,scroll_2)
 table.insert(shade2,scroll_2)
@@ -1769,12 +2367,12 @@ scroll_3.Name = "scroll"
 scroll_3.Parent = join
 scroll_3.BackgroundColor3 = Color3.new(0.180392, 0.180392, 0.184314)
 scroll_3.BorderSizePixel = 0
-scroll_3.Position = UDim2.new(0, 5, 0, 25)
-scroll_3.Size = UDim2.new(0, 328, 0, 190)
+scroll_3.Position = UDim2.new(0, 5, 0, 34)
+scroll_3.Size = UDim2.new(0, 328, 0, 181)
 scroll_3.ZIndex = 10
 scroll_3.BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 scroll_3.CanvasSize = UDim2.new(0, 0, 0, 10)
-scroll_3.ScrollBarThickness = 8
+scroll_3.ScrollBarThickness = 12
 scroll_3.TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 table.insert(scroll,scroll_3)
 table.insert(shade2,scroll_3)
@@ -1784,7 +2382,7 @@ selectChat.Parent = background
 selectChat.BackgroundColor3 = Color3.new(0.180392, 0.180392, 0.184314)
 selectChat.BorderSizePixel = 0
 selectChat.Position = UDim2.new(0, 5, 0, 5)
-selectChat.Size = UDim2.new(0, 164, 0, 20)
+selectChat.Size = UDim2.new(0, 164, 0, 24)
 selectChat.ZIndex = 10
 selectChat.Font = Enum.Font.SourceSans
 selectChat.FontSize = Enum.FontSize.Size14
@@ -1798,7 +2396,7 @@ selectJoin.Parent = background
 selectJoin.BackgroundColor3 = Color3.new(0.305882, 0.305882, 0.309804)
 selectJoin.BorderSizePixel = 0
 selectJoin.Position = UDim2.new(0, 169, 0, 5)
-selectJoin.Size = UDim2.new(0, 164, 0, 20)
+selectJoin.Size = UDim2.new(0, 164, 0, 24)
 selectJoin.ZIndex = 10
 selectJoin.Font = Enum.Font.SourceSans
 selectJoin.FontSize = Enum.FontSize.Size14
@@ -1806,6 +2404,23 @@ selectJoin.Text = "Join Logs"
 selectJoin.TextColor3 = Color3.new(1, 1, 1)
 table.insert(shade3,selectJoin)
 table.insert(text1,selectJoin)
+
+-- Focus-visible rings + accessible names for all labeled buttons at once
+for _, btn in pairs({ Close, Add, Delete, Close_2, Delete_3, Close_3, Delete_5, Part, Close_4, Add_3, BindTo, BindTriggerSelect, Add_2, Select, Select_2, AddPlugin, ChoosePart, CopyPath, Clear, Clear_2, Toggle, Toggle_2, SaveChatlogs, selectChat, selectJoin }) do
+	if btn ~= nil and btn.Text ~= nil and btn.Text ~= "" then
+		IY_MakeButtonAccessible(btn, btn.Text)
+	else
+		IY_MakeButtonAccessible(btn, btn.Name)
+	end
+end
+IY_RegisterScaledRoot(logs)
+IY_AddCorner(shadow, 6)
+IY_MakeButtonAccessible(Hide, "Collapse logs panel")
+IY_SetTip(Hide, "Collapse", "Collapse or expand the logs panel")
+IY_MakeButtonAccessible(Exit, "Close logs panel")
+IY_SetTip(Exit, "Close", "Hide the logs panel")
+IY_ApplyScrollA11y(scroll_2, 12)
+IY_ApplyScrollA11y(scroll_3, 12)
 
 function create(data)
 	local insts = {}
@@ -1902,6 +2517,12 @@ end)()
 ViewportTextBox.convert(Cmdbar).View.ZIndex = 10
 ViewportTextBox.convert(Cmdbar_2).View.ZIndex = 10
 ViewportTextBox.convert(Cmdbar_3).View.ZIndex = 10
+
+IY_MakeInputAccessible(Cmdbar, "Command bar")
+IY_MakeInputAccessible(Cmdbar_2, "Keybind command")
+IY_MakeInputAccessible(Cmdbar_3, "Keybind toggle command")
+IY_MakeInputAccessible(PrefixBox, "Command prefix")
+IY_MakeInputAccessible(FileName, "Plugin file name")
 
 IYMouse = Players.LocalPlayer:GetMouse()
 UserInputService = game:GetService("UserInputService")
@@ -2768,10 +3389,10 @@ end)()
 
 currentShade1 = Color3.fromRGB(36, 36, 37)
 currentShade2 = Color3.fromRGB(46, 46, 47)
-currentShade3 = Color3.fromRGB(78, 78, 79)
+currentShade3 = Color3.fromRGB(90, 90, 94)
 currentText1 = Color3.new(1, 1, 1)
-currentText2 = Color3.new(0, 0, 0)
-currentScroll = Color3.fromRGB(78,78,79)
+currentText2 = Color3.new(1, 1, 1)
+currentScroll = Color3.fromRGB(125, 125, 130)
 
 defaultsettings = {
 	prefix = ';';
@@ -2780,6 +3401,9 @@ defaultsettings = {
 	keepIY = true;
 	logsEnabled = false;
 	jLogsEnabled = false;
+	uiScale = 1;
+	reduceMotion = false;
+	highContrast = false;
 	aliases = {};
 	binds = {};
 	WayPoints = {};
@@ -2809,6 +3433,10 @@ function saves()
 					if json.espTransparency ~= nil then espTransparency = json.espTransparency else espTransparency = 0.3 end
 					if json.logsEnabled ~= nil then logsEnabled = json.logsEnabled else logsEnabled = false end
 					if json.jLogsEnabled ~= nil then jLogsEnabled = json.jLogsEnabled else jLogsEnabled = false end
+					if json.uiScale ~= nil then IY_A11y.uiScale = json.uiScale else IY_A11y.uiScale = 1 end
+					IY_A11y.uiScale = math.clamp(tonumber(IY_A11y.uiScale) or 1, 0.85, 1.4)
+					if json.reduceMotion ~= nil then IY_A11y.reduceMotion = json.reduceMotion else IY_A11y.reduceMotion = false end
+					if json.highContrast ~= nil then IY_A11y.highContrast = json.highContrast else IY_A11y.highContrast = false end
 					if json.aliases ~= nil then aliases = json.aliases else aliases = {} end
 					if json.binds ~= nil then binds = (json.binds or {}) else binds = {} end
 					if json.spawnCmds ~= nil then spawnCmds = json.spawnCmds end
@@ -2841,6 +3469,9 @@ function saves()
 				saves()
 			else
 				nosaves = true
+				IY_A11y.uiScale = 1
+				IY_A11y.reduceMotion = false
+				IY_A11y.highContrast = false
 				prefix = ';'
 				StayOpen = false
 				KeepInfYield = true
@@ -2938,6 +3569,9 @@ function saves()
 		espTransparency = 0.3
 		logsEnabled = false
 		jLogsEnabled = false
+		IY_A11y.uiScale = 1
+		IY_A11y.reduceMotion = false
+		IY_A11y.highContrast = false
 		aliases = {}
 		binds = {}
 		WayPoints = {}
@@ -2946,9 +3580,15 @@ function saves()
 end
 
 saves()
+IY_RefreshA11yButtons()
 
 function updatesaves()
 	if nosaves == false and writefileExploit() then
+		-- Persist the user's own theme even while the high-contrast preset is on
+		local s1, s2, s3, t1, t2, sc = currentShade1, currentShade2, currentShade3, currentText1, currentText2, currentScroll
+		if IY_A11y.highContrast and IY_HighContrastCache then
+			s1, s2, s3, t1, t2, sc = IY_HighContrastCache.shade1, IY_HighContrastCache.shade2, IY_HighContrastCache.shade3, IY_HighContrastCache.text1, IY_HighContrastCache.text2, IY_HighContrastCache.scroll
+		end
 		local update = {
 			prefix = prefix;
 			StayOpen = StayOpen;
@@ -2956,16 +3596,19 @@ function updatesaves()
 			espTransparency = espTransparency;
 			logsEnabled = logsEnabled;
 			jLogsEnabled = jLogsEnabled;
+			uiScale = IY_A11y.uiScale;
+			reduceMotion = IY_A11y.reduceMotion;
+			highContrast = IY_A11y.highContrast;
 			aliases = aliases;
 			binds = binds or {};
 			WayPoints = AllWaypoints;
 			PluginsTable = PluginsTable;
-			currentShade1 = {currentShade1.R,currentShade1.G,currentShade1.B};
-			currentShade2 = {currentShade2.R,currentShade2.G,currentShade2.B};
-			currentShade3 = {currentShade3.R,currentShade3.G,currentShade3.B};
-			currentText1 = {currentText1.R,currentText1.G,currentText1.B};
-			currentText2 = {currentText2.R,currentText2.G,currentText2.B};
-			currentScroll = {currentScroll.R,currentScroll.G,currentScroll.B};
+			currentShade1 = {s1.R,s1.G,s1.B};
+			currentShade2 = {s2.R,s2.G,s2.B};
+			currentShade3 = {s3.R,s3.G,s3.B};
+			currentText1 = {t1.R,t1.G,t1.B};
+			currentText2 = {t2.R,t2.G,t2.B};
+			currentScroll = {sc.R,sc.G,sc.B};
 			eventBinds = eventEditor.SaveData()
 		}
 		writefileCooldown("IY_FE.iy", HttpService:JSONEncode(update))
@@ -3003,11 +3646,7 @@ PrefixBox.Text = prefix
 local SettingsOpen = false
 local isHidden = false
 
-if StayOpen == false then
-	On.BackgroundTransparency = 1
-else
-	On.BackgroundTransparency = 0
-end
+IY_SetToggleVisual(On, StayOpen ~= false)
 
 if logsEnabled then
 	Toggle.Text = 'Enabled'
@@ -3041,52 +3680,116 @@ function cmdbarHolder()
 end
 
 pinNotification = nil
-local notifyCount = 0
-function notify(text,text2,length)
-	task.spawn(function()
-		local LnotifyCount = notifyCount+1
-		local notificationPinned = false
-		notifyCount = notifyCount+1
-		if pinNotification then pinNotification:Disconnect() end
-		pinNotification = PinButton.MouseButton1Click:Connect(function()
-			task.spawn(function()
-				pinNotification:Disconnect()
-				notificationPinned = true
-				Title_2.BackgroundTransparency = 1
-				wait(0.5)
-				Title_2.BackgroundTransparency = 0
-			end)
-		end)
-		Notification:TweenPosition(UDim2.new(1, Notification.Position.X.Offset, 1, 0), "InOut", "Quart", 0.5, true, nil)
-		wait(0.6)
-		local closepressed = false
-		if text2 then
-			Title_2.Text = text
-			Text_2.Text = text2
-		else
-			Title_2.Text = 'Notification'
-			Text_2.Text = text
-		end
-		Notification:TweenPosition(UDim2.new(1, Notification.Position.X.Offset, 1, -100), "InOut", "Quart", 0.5, true, nil)
-		CloseButton.MouseButton1Click:Connect(function()
-			Notification:TweenPosition(UDim2.new(1, Notification.Position.X.Offset, 1, 0), "InOut", "Quart", 0.5, true, nil)
-			closepressed = true
-			pinNotification:Disconnect()
-		end)
-		if length and isNumber(length) then
-			wait(length)
-		else
-			wait(10)
-		end
-		if LnotifyCount == notifyCount then
-			if closepressed == false and notificationPinned == false then
-				pinNotification:Disconnect()
-				Notification:TweenPosition(UDim2.new(1, Notification.Position.X.Offset, 1, 0), "InOut", "Quart", 0.5, true, nil)
-			end
-			notifyCount = 0
-		end
+-- Queued notifications: messages are never overwritten, auto-dismiss pauses
+-- while hovered, Escape dismisses, and a progress bar shows remaining time.
+IY_NotifyQueue = {}
+IY_NotifyBusy = false
+IY_NotifyHover = false
+IY_NotifyPinned = false
+IY_NotifyDismiss = false
+IY_NotifyWired = false
+
+function IY_DismissNotification()
+	IY_NotifyDismiss = true
+end
+
+function IY_WireNotificationOnce()
+	if IY_NotifyWired then return end
+	IY_NotifyWired = true
+	CloseButton.MouseButton1Click:Connect(function()
+		IY_NotifyDismiss = true
+	end)
+	PinButton.MouseButton1Click:Connect(function()
+		IY_NotifyPinned = not IY_NotifyPinned
+		Title_2.BackgroundTransparency = 1
+		wait(0.15)
+		Title_2.BackgroundTransparency = 0
+	end)
+	Notification.MouseEnter:Connect(function()
+		IY_NotifyHover = true
+	end)
+	Notification.MouseLeave:Connect(function()
+		IY_NotifyHover = false
 	end)
 end
+
+function IY_ShowNotification(title, body, length)
+	IY_WireNotificationOnce()
+	IY_NotifyPinned = false
+	IY_NotifyDismiss = false
+	Title_2.Text = title
+	Text_2.Text = body
+	pcall(function()
+		Notification:SetAttribute("LiveMessage", title .. ": " .. body)
+	end)
+	IY_SafeTweenPosition(Notification, UDim2.new(1, Notification.Position.X.Offset, 1, -100), "InOut", "Quart", 0.3, true, nil)
+	local duration = 10
+	if length and isNumber(length) then
+		duration = tonumber(length) or 10
+	end
+	duration = math.clamp(duration, 1, 60)
+	pcall(function()
+		IY_NotifyProgress.BackgroundColor3 = IY_FocusColor
+		IY_NotifyProgress.Size = UDim2.new(1, -16, 0, 3)
+	end)
+	local elapsed = 0
+	while elapsed < duration do
+		wait(0.1)
+		if IY_NotifyDismiss then break end
+		if not IY_NotifyHover and not IY_NotifyPinned then
+			elapsed = elapsed + 0.1
+		end
+		pcall(function()
+			local frac = math.clamp(1 - (elapsed / duration), 0, 1)
+			IY_NotifyProgress.Size = UDim2.new(frac, -16 * frac, 0, 3)
+		end)
+	end
+	pcall(function()
+		IY_NotifyProgress.Size = UDim2.new(0, 0, 0, 3)
+	end)
+	if not IY_NotifyPinned or IY_NotifyDismiss then
+		IY_SafeTweenPosition(Notification, UDim2.new(1, Notification.Position.X.Offset, 1, 0), "InOut", "Quart", 0.3, true, nil)
+	end
+end
+
+function notify(text,text2,length)
+	local title, body
+	if text2 then
+		title = tostring(text)
+		body = tostring(text2)
+	else
+		title = "Notification"
+		body = tostring(text)
+	end
+	table.insert(IY_NotifyQueue, { title = title, body = body, length = length })
+	while #IY_NotifyQueue > 4 do
+		table.remove(IY_NotifyQueue, 1)
+	end
+	if IY_NotifyBusy then return end
+	task.spawn(function()
+		IY_NotifyBusy = true
+		while #IY_NotifyQueue > 0 do
+			local item = table.remove(IY_NotifyQueue, 1)
+			IY_ShowNotification(item.title, item.body, item.length)
+		end
+		IY_NotifyBusy = false
+	end)
+end
+
+-- Global Escape: dismiss tooltip/notification, close floating editors
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if input.KeyCode == Enum.KeyCode.Escape then
+		Tooltip.Visible = false
+		IY_DismissNotification()
+		for _, panel in pairs({ KeybindEditor, PluginEditor, ToPartFrame }) do
+			pcall(function()
+				if panel ~= nil and panel.Position.Y.Offset > -100 then
+					IY_SafeTweenPosition(panel, UDim2.new(0.5, -180, 0, -500), "InOut", "Quart", 0.3, true, nil)
+				end
+			end)
+		end
+	end
+end)
 
 local lastMessage = nil
 local lastLabel = nil
@@ -3225,6 +3928,15 @@ Holder.MouseLeave:Connect(function()
 end)
 
 function updateColors(color,ctype)
+	-- Theme edits made while high contrast is on apply to the saved theme
+	if IY_A11y.highContrast and IY_HighContrastCache and not IY_ApplyingPreset then
+		if ctype == shade1 then IY_HighContrastCache.shade1 = color
+		elseif ctype == shade2 then IY_HighContrastCache.shade2 = color
+		elseif ctype == shade3 then IY_HighContrastCache.shade3 = color
+		elseif ctype == text1 then IY_HighContrastCache.text1 = color
+		elseif ctype == text2 then IY_HighContrastCache.text2 = color
+		elseif ctype == scroll then IY_HighContrastCache.scroll = color end
+	end
 	if ctype == shade1 then
 		for i,v in pairs(shade1) do
 			v.BackgroundColor3 = color
@@ -3244,7 +3956,9 @@ function updateColors(color,ctype)
 		for i,v in pairs(text1) do
 			v.TextColor3 = color
 			if v:IsA("TextBox") then
-				v.PlaceholderColor3 = color	
+				-- Keep placeholder text visibly distinct from real input
+				local ok, faded = pcall(function() return color:Lerp(Color3.fromRGB(130, 130, 135), 0.5) end)
+				v.PlaceholderColor3 = (ok and faded) or Color3.fromRGB(175, 175, 180)
 			end
 		end
 		currentText1 = color
@@ -3706,11 +4420,10 @@ On.MouseButton1Click:Connect(function()
 	if isHidden == false then
 		if StayOpen == false then
 			StayOpen = true
-			On.BackgroundTransparency = 0
 		else
 			StayOpen = false
-			On.BackgroundTransparency = 1
 		end
+		IY_SetToggleVisual(On, StayOpen)
 		updatesaves()
 	end
 end)
@@ -3857,10 +4570,10 @@ Exit.MouseButton1Down:Connect(function()
 end)
 
 Hide.MouseButton1Down:Connect(function()
-	if logs.Position ~= UDim2.new(0, 0, 1, -20) then
-		logs:TweenPosition(UDim2.new(0, 0, 1, -20), "InOut", "Quart", 0.3, true, nil)
+	if logs.Position ~= UDim2.new(0, 0, 1, -28) then
+		logs:TweenPosition(UDim2.new(0, 0, 1, -28), "InOut", "Quart", 0.3, true, nil)
 	else
-		logs:TweenPosition(UDim2.new(0, 0, 1, -265), "InOut", "Quart", 0.3, true, nil)
+		logs:TweenPosition(UDim2.new(0, 0, 1, -273), "InOut", "Quart", 0.3, true, nil)
 	end
 end)
 
@@ -4017,7 +4730,7 @@ end)
 
 PrefixBox:GetPropertyChangedSignal("Text"):Connect(function()
 	prefix = PrefixBox.Text
-	Cmdbar.PlaceholderText = "Command Bar ("..prefix..")"
+	Cmdbar.PlaceholderText = "Search commands ("..prefix..")"
 	updatesaves()
 end)
 
@@ -4121,6 +4834,9 @@ IndexContents = function(str,bool,cmdbar,Ianim)
 	local indexnum = 0
 	local frame = CMDsF
 	topCommand = nil
+	IY_VisibleCmds = {}
+	IY_ClearSelectedRow()
+	local totalCmds = 0
 	local chunks = {}
 	if str:sub(#str,#str) == "\\" then str = "" end
 	for w in string.gmatch(str,"[^\\]+") do
@@ -4130,10 +4846,12 @@ IndexContents = function(str,bool,cmdbar,Ianim)
 	if str:sub(1,1) == "!" then str = str:sub(2) end
 	for i,v in next, frame:GetChildren() do
 		if v:IsA("TextButton") then
+			totalCmds = totalCmds + 1
 			if bool then
 				if Match(v.Text,str) then
 					indexnum = indexnum + 1
 					v.Visible = true
+					table.insert(IY_VisibleCmds, v)
 					if topCommand == nil then
 						topCommand = v.Text
 					end
@@ -4142,6 +4860,7 @@ IndexContents = function(str,bool,cmdbar,Ianim)
 				end
 			else
 				v.Visible = true
+				table.insert(IY_VisibleCmds, v)
 				if topCommand == nil then
 					topCommand = v.Text
 				end
@@ -4149,6 +4868,10 @@ IndexContents = function(str,bool,cmdbar,Ianim)
 		end
 	end
 	frame.CanvasSize = UDim2.new(0,0,0,cmdListLayout.AbsoluteContentSize.Y)
+	if #IY_VisibleCmds > 0 and Cmdbar and Cmdbar:IsFocused() then
+		IY_SetSelectedRow(IY_VisibleCmds[1], false)
+	end
+	IY_UpdateStatusBar(indexnum, totalCmds, str)
 	if not Ianim then
 		if indexnum == 0 or string.find(str, " ") then
 			if not cmdbar then
@@ -4647,6 +5370,7 @@ for i = 1, #CMDs do
 	newcmd.Text = CMDs[i].NAME
 	newcmd.Name = 'CMD'
 	table.insert(text1,newcmd)
+	IY_StyleCommandRow(newcmd)
 	if CMDs[i].DESC ~= '' then
 		newcmd:SetAttribute("Title", CMDs[i].NAME)
 		newcmd:SetAttribute("Desc", CMDs[i].DESC)
@@ -4668,35 +5392,41 @@ function checkTT()
 	local guisAtPosition = COREGUI:GetGuiObjectsAtPosition(IYMouse.X, IYMouse.Y)
 
 	for _, gui in pairs(guisAtPosition) do
-		if gui.Parent == CMDsF then
+		if gui.Parent == CMDsF and gui:GetAttribute("Title") ~= nil then
+			t = gui
+		elseif gui:GetAttribute("IY_TipTitle") ~= nil then
 			t = gui
 		end
 	end
 
-	if t ~= nil and t:GetAttribute("Title") ~= nil then
-		local x = IYMouse.X
-		local y = IYMouse.Y
-		local xP
-		local yP
-		if IYMouse.X > 200 then
-			xP = x - 201
-		else
-			xP = x + 21
+	if t ~= nil then
+		local title = t:GetAttribute("Title") or t:GetAttribute("IY_TipTitle")
+		local desc = t:GetAttribute("Desc") or t:GetAttribute("IY_TipDesc") or ""
+		if title ~= nil then
+			if t:GetAttribute("IY_Disabled") then
+				title = title .. " (disabled)"
+				desc = "This command was disabled with removecmd"
+			end
+			local x = IYMouse.X
+			local y = IYMouse.Y
+			local xP
+			local yP
+			if x > 220 then
+				xP = x - 221
+			else
+				xP = x + 21
+			end
+			if y > (IYMouse.ViewSizeY - 104) then
+				yP = y - 105
+			else
+				yP = y
+			end
+			IY_ShowTooltip(title, desc, xP, yP)
+			return
 		end
-		if IYMouse.Y > (IYMouse.ViewSizeY-96) then
-			yP = y - 97
-		else
-			yP = y
-		end
-		Tooltip.Position = UDim2.new(0, xP, 0, yP)
-		Description.Text = t:GetAttribute("Desc")
-		if t:GetAttribute("Title") ~= nil then
-			Title_3.Text = t:GetAttribute("Title")
-		else
-			Title_3.Text = ''
-		end
-		Tooltip.Visible = true
-	else
+	end
+	-- Keep keyboard-driven tooltips while the command bar has focus
+	if not (Cmdbar and Cmdbar:IsFocused() and IY_SelectedRow ~= nil) then
 		Tooltip.Visible = false
 	end
 end
@@ -4923,6 +5653,8 @@ function removecmd(cmd)
 				for a,c in pairs(CMDsF:GetChildren()) do
 					if string.find(c.Text, "^"..cmd.."$") or string.find(c.Text, "^"..cmd.." ") or string.find(c.Text, " "..cmd.."$") or string.find(c.Text, " "..cmd.." ") then
 						c.TextTransparency = 0.7
+						c:SetAttribute("IY_Disabled", true)
+						c.Selectable = false
 						c.MouseButton1Click:Connect(function()
 							notify(c.Text, "Command has been disabled by you or a plugin")
 						end)
@@ -4961,6 +5693,7 @@ function addcmdtext(text,name,desc)
 	newcmd.Text = text
 	newcmd.Name = 'PLUGIN_'..name
 	table.insert(text1,newcmd)
+	IY_StyleCommandRow(newcmd)
 	if desc and desc ~= '' then
 		newcmd:SetAttribute("Title", tooltipText)
 		newcmd:SetAttribute("Desc", tooltipDesc)
@@ -5346,15 +6079,26 @@ UserInputService.InputBegan:Connect(function(input,gameProcessed)
 	if gameProcessed then
 		if Cmdbar and Cmdbar:IsFocused() then
 			if input.KeyCode == Enum.KeyCode.Up then
-				historyCount = historyCount + 1
-				if historyCount > #cmdHistory then historyCount = #cmdHistory end
-				Cmdbar.Text = cmdHistory[historyCount] or ""
-				Cmdbar.CursorPosition = 1020
+				if Cmdbar.Text ~= "" and #IY_VisibleCmds > 0 then
+					IY_MoveSelection(-1)
+				else
+					historyCount = historyCount + 1
+					if historyCount > #cmdHistory then historyCount = #cmdHistory end
+					Cmdbar.Text = cmdHistory[historyCount] or ""
+					Cmdbar.CursorPosition = 1020
+				end
 			elseif input.KeyCode == Enum.KeyCode.Down then
-				historyCount = historyCount - 1
-				if historyCount < 0 then historyCount = 0 end
-				Cmdbar.Text = cmdHistory[historyCount] or ""
-				Cmdbar.CursorPosition = 1020
+				if Cmdbar.Text ~= "" and #IY_VisibleCmds > 0 then
+					IY_MoveSelection(1)
+				else
+					historyCount = historyCount - 1
+					if historyCount < 0 then historyCount = 0 end
+					Cmdbar.Text = cmdHistory[historyCount] or ""
+					Cmdbar.CursorPosition = 1020
+				end
+			elseif input.KeyCode == Enum.KeyCode.Escape then
+				Cmdbar.Text = ""
+				Cmdbar:ReleaseFocus()
 			end
 		elseif input.KeyCode == Enum.KeyCode.Return or input.KeyCode == Enum.KeyCode.KeypadEnter then
 			lastEnteredString = lastTextBoxString
@@ -5371,10 +6115,13 @@ Players.LocalPlayer.Chatted:Connect(function()
 	end
 end)
 
-Cmdbar.PlaceholderText = "Command Bar ("..prefix..")"
+Cmdbar.PlaceholderText = "Search commands ("..prefix..")"
 Cmdbar:GetPropertyChangedSignal("Text"):Connect(function()
 	if Cmdbar:IsFocused() then
 		IndexContents(Cmdbar.Text,true,true)
+	end
+	if IY_ClearCmd ~= nil then
+		IY_ClearCmd.Visible = Cmdbar.Text ~= ""
 	end
 end)
 
@@ -5389,6 +6136,9 @@ Cmdbar.FocusLost:Connect(function(enterpressed)
 	wait()
 	if not Cmdbar:IsFocused() then
 		Cmdbar.Text = ""
+		IY_ClearSelectedRow()
+		Tooltip.Visible = false
+		if IY_ClearCmd ~= nil then IY_ClearCmd.Visible = false end
 		IndexContents('',true,false,true)
 		if SettingsOpen == true then
 			wait(0.2)
@@ -5409,8 +6159,11 @@ Cmdbar.Focused:Connect(function()
 	end
 	tabComplete = UserInputService.InputBegan:Connect(function(input,gameProcessed)
 		if Cmdbar:IsFocused() then
-			if tabAllowed == true and input.KeyCode == Enum.KeyCode.Tab and topCommand ~= nil then
-				autoComplete(topCommand)
+			if tabAllowed == true and input.KeyCode == Enum.KeyCode.Tab then
+				local target = (IY_SelectedRow ~= nil and IY_SelectedRow.Text) or topCommand
+				if target ~= nil then
+					autoComplete(target)
+				end
 			end
 		else
 			tabComplete:Disconnect()
@@ -5680,7 +6433,7 @@ function refreshbinds()
 		Holder_2:ClearAllChildren()
 		Holder_2.CanvasSize = UDim2.new(0, 0, 0, 10)
 		for i = 1, #binds do
-			local YSize = 25
+			local YSize = 32
 			local Position = ((i * YSize) - YSize)
 			local newbind = Example_2:Clone()
 			newbind.Parent = Holder_2
@@ -5703,7 +6456,7 @@ function refreshbinds()
 			else
 				newbind.Text.Text = key.." > "..binds[i].COMMAND.."  "..(binds[i].ISKEYUP and "(keyup)" or "(keydown)")
 			end
-			Holder_2.CanvasSize = UDim2.new(0,0,0, Position + 30)
+			Holder_2.CanvasSize = UDim2.new(0,0,0, Position + 37)
 			newbind.Text.Delete.MouseButton1Click:Connect(function()
 				unkeybind(binds[i].COMMAND,binds[i].KEY)
 			end)
@@ -5742,7 +6495,7 @@ function refreshwaypoints()
 	if Holder_4 then
 		Holder_4:ClearAllChildren()
 		Holder_4.CanvasSize = UDim2.new(0, 0, 0, 10)
-		local YSize = 25
+		local YSize = 32
 		local num = 1
 		for i = 1, #WayPoints do
 			local Position = ((num * YSize) - YSize)
@@ -5758,7 +6511,7 @@ function refreshwaypoints()
 			table.insert(text2,newpoint.Text.Delete)
 			table.insert(shade3,newpoint.Text.TP)
 			table.insert(text2,newpoint.Text.TP)
-			Holder_4.CanvasSize = UDim2.new(0,0,0, Position + 30)
+			Holder_4.CanvasSize = UDim2.new(0,0,0, Position + 37)
 			newpoint.Text.Delete.MouseButton1Click:Connect(function()
 				execCmd('dpos '..WayPoints[i].NAME)
 			end)
@@ -5781,7 +6534,7 @@ function refreshwaypoints()
 			table.insert(text2,newpoint.Text.Delete)
 			table.insert(shade3,newpoint.Text.TP)
 			table.insert(text2,newpoint.Text.TP)
-			Holder_4.CanvasSize = UDim2.new(0,0,0, Position + 30)
+			Holder_4.CanvasSize = UDim2.new(0,0,0, Position + 37)
 			newpoint.Text.Delete.MouseButton1Click:Connect(function()
 				execCmd('dpos '..pWayPoints[i].NAME)
 			end)
@@ -5803,7 +6556,7 @@ function refreshaliases()
 		Holder_3:ClearAllChildren()
 		Holder_3.CanvasSize = UDim2.new(0, 0, 0, 10)
 		for i = 1, #aliases do
-			local YSize = 25
+			local YSize = 32
 			local Position = ((i * YSize) - YSize)
 			local newalias = Example_3:Clone()
 			newalias.Parent = Holder_3
@@ -5815,7 +6568,7 @@ function refreshaliases()
 			table.insert(text1,newalias.Text)
 			table.insert(shade3,newalias.Text.Delete)
 			table.insert(text2,newalias.Text.Delete)
-			Holder_3.CanvasSize = UDim2.new(0,0,0, Position + 30)
+			Holder_3.CanvasSize = UDim2.new(0,0,0, Position + 37)
 			newalias.Text.Delete.MouseButton1Click:Connect(function()
 				execCmd('removealias '..aliases[i].ALIAS)
 			end)
@@ -5839,11 +6592,11 @@ newToggle = false
 Cmdbar_3.Parent.Visible = false
 On_2.MouseButton1Click:Connect(function()
 	if newToggle == false then newToggle = true
-		On_2.BackgroundTransparency = 0
+		IY_SetToggleVisual(On_2, true)
 		Cmdbar_3.Parent.Visible = true
 		BindTriggerSelect.Visible = false
 	else newToggle = false
-		On_2.BackgroundTransparency = 1
+		IY_SetToggleVisual(On_2, false)
 		Cmdbar_3.Parent.Visible = false
 		BindTriggerSelect.Visible = true
 	end
@@ -6069,7 +6822,7 @@ function refreshplugins(dontSave)
 		Holder_5.CanvasSize = UDim2.new(0, 0, 0, 10)
 		for i,v in pairs(PluginsTable) do
 			local pName = v
-			local YSize = 25
+			local YSize = 32
 			local Position = ((i * YSize) - YSize)
 			local newplugin = Example_5:Clone()
 			newplugin.Parent = Holder_5
@@ -6081,7 +6834,7 @@ function refreshplugins(dontSave)
 			table.insert(text1,newplugin.Text)
 			table.insert(shade3,newplugin.Text.Delete)
 			table.insert(text2,newplugin.Text.Delete)
-			Holder_5.CanvasSize = UDim2.new(0,0,0, Position + 30)
+			Holder_5.CanvasSize = UDim2.new(0,0,0, Position + 37)
 			newplugin.Text.Delete.MouseButton1Click:Connect(function()
 				deletePlugin(pName)
 			end)
@@ -6174,12 +6927,17 @@ function FindPlugins()
 end
 
 AddPlugin.MouseButton1Click:Connect(function()
-	addPlugin(PluginsGUI.FileName.Text)
+	local pluginName = PluginsGUI.FileName.Text
+	if pluginName == nil or pluginName == "" then
+		notify("Add Plugin", "Type a plugin file name first")
+		return
+	end
+	addPlugin(pluginName)
 end)
 
 Exit_3.MouseButton1Click:Connect(function()
 	PluginEditor:TweenPosition(UDim2.new(0.5, -180, 0, -500), "InOut", "Quart", 0.5, true, nil)
-	FileName.Text = 'Plugin File Name'
+	FileName.Text = ''
 end)
 
 Add_3.MouseButton1Click:Connect(function()
@@ -12074,6 +12832,15 @@ updateColors(currentText1,text1)
 updateColors(currentText2,text2)
 updateColors(currentScroll,scroll)
 
+-- Apply persisted accessibility prefs after the saved theme loads
+IY_ApplyUIScale()
+IY_RefreshA11yButtons()
+if IY_A11y.highContrast then
+	IY_A11y.highContrast = false
+	IY_SetHighContrast(true)
+	IY_RefreshA11yButtons()
+end
+
 if PluginsTable ~= nil or PluginsTable ~= {} then
 	FindPlugins(PluginsTable)
 end
@@ -12282,15 +13049,39 @@ task.spawn(function()
 end)
 
 task.spawn(function()
+	if IY_A11y.reduceMotion then
+		pcall(function()
+			Logo:Destroy()
+			Credits:Destroy()
+			IntroBackground:Destroy()
+		end)
+		minimizeHolder()
+		if table.find({Enum.Platform.IOS, Enum.Platform.Android}, UserInputService:GetPlatform()) then notify("Unstable Device", "On mobile, Infinite Yield may have issues or features that are not functioning correctly.") end
+		return
+	end
+	-- Skippable intro: click/tap the splash to dismiss it immediately
+	local skipped = false
+	pcall(function()
+		local function skip(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				skipped = true
+			end
+		end
+		IntroBackground.InputBegan:Connect(skip)
+		Logo.InputBegan:Connect(skip)
+	end)
 	wait()
 	Credits:TweenPosition(UDim2.new(0, 0, 0.9, 0), "Out", "Quart", 0.2)
 	Logo:TweenSizeAndPosition(UDim2.new(0, 175, 0, 175), UDim2.new(0, 37, 0, 45), "Out", "Quart", 0.3)
-	wait(1)
-	local OutInfo = TweenInfo.new(1.6809, Enum.EasingStyle.Sine, Enum.EasingDirection.Out, 0, false, 0)
+	for i = 1, 20 do
+		if skipped then break end
+		wait(0.05)
+	end
+	local OutInfo = TweenInfo.new(skipped and 0.2 or 1.6809, Enum.EasingStyle.Sine, Enum.EasingDirection.Out, 0, false, 0)
 	TweenService:Create(Logo, OutInfo, {ImageTransparency = 1}):Play()
 	TweenService:Create(IntroBackground, OutInfo, {BackgroundTransparency = 1}):Play()
 	Credits:TweenPosition(UDim2.new(0, 0, 0.9, 30), "Out", "Quart", 0.2)
-	wait(0.2)
+	wait(0.25)
 	Logo:Destroy()
 	Credits:Destroy()
 	IntroBackground:Destroy()
