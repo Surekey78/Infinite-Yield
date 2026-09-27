@@ -25,6 +25,32 @@ loadstring(game:HttpGet('https://raw.githubusercontent.com/DarkNetworks/Infinite
 
 - ⚙️ **VR Support**: `vr` - Use VR in all of the games you can think of!
 
+## Quick Actions (v5.10.0)
+
+- ⚡ **Quick commands**: 8 slots for your favorite commands. Tap a slot to run
+  it instantly — no typing. Settings → Quick Commands, or
+  `quickadd [1-8] [command]`, `quick / q [slot]`, `quickdel`, `quicklist`,
+  `quickpanel / qp`.
+- 📍 **Quick waypoints**: 6 one-tap teleport slots. Settings → Quick
+  Waypoints, or `sqwp [1-6] [name]` to save where you stand, `qwp [slot]` to
+  teleport, `qwpanel`.
+- 😴 **AFK mode**: repeats your chosen commands on a timer, keeps you
+  anti-idle, and can auto-jump. Persistent `AFK MODE ON` status, green FAB
+  indicator. Settings → AFK Mode, or `afk`, `afkadd`, `afkdel`, `afklist`,
+  `afkinterval [5-600]`, `afkjump`, `afkpanel`.
+- 🔘 **Floating button**: a draggable round button that runs a command list
+  with one tap. Drag to move, tap to run, hold to configure. Settings →
+  Floating Button, or `fab`, `fabadd`, `fabdel`, `fablist`, `fabclear`,
+  `fabpanel`.
+- 📱 **Mobile mode**: auto-detects touch devices (or force `on`/`off`).
+  Taller 34px command rows, thicker scrollbars, 115% minimum UI scale, and
+  touch-first status hints. Settings → Mobile Mode, or
+  `mobilemode [auto/on/off]`.
+
+All quick slots, waypoints, AFK/FAB lists, button position/visibility, and
+the mobile mode are saved to `IY_FE.iy` and restored on load. AFK always
+starts OFF.
+
 ## Interface & Accessibility (v5.9.4)
 
 The main window, command bar, notifications, tooltips, settings panels, keybind

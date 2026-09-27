@@ -14,7 +14,7 @@ if not game:IsLoaded() then
 	notLoaded:Destroy()
 end
 
-currentVersion = '5.9.4'
+currentVersion = '5.10.0'
 
 Players = game:GetService("Players")
 
@@ -568,14 +568,23 @@ end
 function IY_UpdateStatusBar(matchCount, totalCount, query)
 	pcall(function()
 		if IY_StatusBar == nil then return end
+		local touchUI = IY_Mobile ~= nil and IY_Mobile.effective
 		if query ~= nil and query ~= "" then
 			if matchCount == 0 then
 				IY_StatusBar.Text = "No matches for \"" .. query .. "\""
+			elseif touchUI then
+				IY_StatusBar.Text = matchCount .. " match" .. (matchCount == 1 and "" or "es") .. " -- tap a result to fill"
 			else
 				IY_StatusBar.Text = matchCount .. " match" .. (matchCount == 1 and "" or "es") .. " -- Tab: complete | Up/Down: select"
 			end
 		else
-			IY_StatusBar.Text = totalCount .. " commands -- type to search | prefix \"" .. tostring(prefix) .. "\""
+			if afkEnabled then
+				IY_StatusBar.Text = "AFK MODE ON -- every " .. tostring(afkInterval) .. "s (run " .. tostring(prefix) .. "afk to stop)"
+			elseif touchUI then
+				IY_StatusBar.Text = totalCount .. " commands -- tap a result to fill"
+			else
+				IY_StatusBar.Text = totalCount .. " commands -- type to search | prefix \"" .. tostring(prefix) .. "\""
+			end
 		end
 	end)
 end
@@ -773,7 +782,7 @@ SettingsHolder.BorderSizePixel = 0
 SettingsHolder.Size = UDim2.new(1,0,1,0)
 SettingsHolder.ScrollBarImageColor3 = Color3.fromRGB(78,78,79)
 SettingsHolder.BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
-SettingsHolder.CanvasSize = UDim2.new(0, 0, 0, 325)
+SettingsHolder.CanvasSize = UDim2.new(0, 0, 0, 475)
 SettingsHolder.MidImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
 SettingsHolder.ScrollBarThickness = 12
 SettingsHolder.TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
@@ -3404,6 +3413,14 @@ defaultsettings = {
 	uiScale = 1;
 	reduceMotion = false;
 	highContrast = false;
+	quickCmds = {"","","","","","","",""};
+	quickWPs = {{},{},{},{},{},{}};
+	afkCmds = {};
+	afkInterval = 30;
+	afkJump = true;
+	fabCmds = {};
+	fabVisible = true;
+	mobileMode = "auto";
 	aliases = {};
 	binds = {};
 	WayPoints = {};
@@ -3437,6 +3454,15 @@ function saves()
 					IY_A11y.uiScale = math.clamp(tonumber(IY_A11y.uiScale) or 1, 0.85, 1.4)
 					if json.reduceMotion ~= nil then IY_A11y.reduceMotion = json.reduceMotion else IY_A11y.reduceMotion = false end
 					if json.highContrast ~= nil then IY_A11y.highContrast = json.highContrast else IY_A11y.highContrast = false end
+					if json.quickCmds ~= nil then quickCmds = json.quickCmds else quickCmds = {"","","","","","","",""} end
+					if json.quickWPs ~= nil then quickWPs = json.quickWPs else quickWPs = {{},{},{},{},{},{}} end
+					if json.afkCmds ~= nil then afkCmds = json.afkCmds else afkCmds = {} end
+					if json.afkInterval ~= nil then afkInterval = json.afkInterval else afkInterval = 30 end
+					if json.afkJump ~= nil then afkJump = json.afkJump else afkJump = true end
+					if json.fabCmds ~= nil then fabCmds = json.fabCmds else fabCmds = {} end
+					if json.fabVisible ~= nil then fabVisible = json.fabVisible else fabVisible = true end
+					if json.fabPos ~= nil then fabPos = json.fabPos else fabPos = nil end
+					if json.mobileMode ~= nil then mobileMode = json.mobileMode else mobileMode = "auto" end
 					if json.aliases ~= nil then aliases = json.aliases else aliases = {} end
 					if json.binds ~= nil then binds = (json.binds or {}) else binds = {} end
 					if json.spawnCmds ~= nil then spawnCmds = json.spawnCmds end
@@ -3479,6 +3505,15 @@ function saves()
 				logsEnabled = false
 				jLogsEnabled = false
 				aliases = {}
+				quickCmds = {"","","","","","","",""}
+				quickWPs = {{},{},{},{},{},{}}
+				afkCmds = {}
+				afkInterval = 30
+				afkJump = true
+				fabCmds = {}
+				fabVisible = true
+				fabPos = nil
+				mobileMode = "auto"
 				binds = {}
 				WayPoints = {}
 				PluginsTable = {}
@@ -3573,6 +3608,15 @@ function saves()
 		IY_A11y.reduceMotion = false
 		IY_A11y.highContrast = false
 		aliases = {}
+		quickCmds = {"","","","","","","",""}
+		quickWPs = {{},{},{},{},{},{}}
+		afkCmds = {}
+		afkInterval = 30
+		afkJump = true
+		fabCmds = {}
+		fabVisible = true
+		fabPos = nil
+		mobileMode = "auto"
 		binds = {}
 		WayPoints = {}
 		PluginsTable = {}
@@ -3599,6 +3643,15 @@ function updatesaves()
 			uiScale = IY_A11y.uiScale;
 			reduceMotion = IY_A11y.reduceMotion;
 			highContrast = IY_A11y.highContrast;
+			quickCmds = quickCmds;
+			quickWPs = quickWPs;
+			afkCmds = afkCmds;
+			afkInterval = afkInterval;
+			afkJump = afkJump;
+			fabCmds = fabCmds;
+			fabVisible = fabVisible;
+			fabPos = fabPos;
+			mobileMode = mobileMode;
 			aliases = aliases;
 			binds = binds or {};
 			WayPoints = AllWaypoints;
@@ -5361,6 +5414,28 @@ CMDs[#CMDs + 1] = {NAME = 'use2022materials / 2022materials', DESC = 'Enables 20
 CMDs[#CMDs + 1] = {NAME = 'unuse2022materials / un2022materials', DESC = 'Disables 2022 material textures'}
 -- New Dark Networks Commands
 CMDs[#CMDs + 1] = {NAME = 'nolighting / nolight', DESC = 'Disables all lighting in the game'}
+CMDs[#CMDs + 1] = {NAME = 'quick / q [slot]', DESC = 'Run a quick command slot (1-8)'}
+CMDs[#CMDs + 1] = {NAME = 'quickadd / qadd [slot] [cmd]', DESC = 'Save a command to a quick slot'}
+CMDs[#CMDs + 1] = {NAME = 'quickdel / qdel [slot]', DESC = 'Clear a quick command slot'}
+CMDs[#CMDs + 1] = {NAME = 'quicklist / qlist', DESC = 'List all quick command slots'}
+CMDs[#CMDs + 1] = {NAME = 'quickpanel / qp', DESC = 'Open the quick commands panel'}
+CMDs[#CMDs + 1] = {NAME = 'qwp [slot]', DESC = 'Teleport to a quick waypoint slot (1-6)'}
+CMDs[#CMDs + 1] = {NAME = 'sqwp [slot] [name]', DESC = 'Save your position to a quick waypoint slot'}
+CMDs[#CMDs + 1] = {NAME = 'qwpanel', DESC = 'Open the quick waypoints panel'}
+CMDs[#CMDs + 1] = {NAME = 'afk', DESC = 'Toggle AFK mode (repeats commands + anti-idle)'}
+CMDs[#CMDs + 1] = {NAME = 'afkadd [command]', DESC = 'Add a command to the AFK repeat list'}
+CMDs[#CMDs + 1] = {NAME = 'afkdel [index]', DESC = 'Remove a command from the AFK list'}
+CMDs[#CMDs + 1] = {NAME = 'afklist', DESC = 'List AFK repeat commands'}
+CMDs[#CMDs + 1] = {NAME = 'afkinterval [sec]', DESC = 'Set AFK repeat interval (5-600s)'}
+CMDs[#CMDs + 1] = {NAME = 'afkjump', DESC = 'Toggle auto-jump in AFK mode'}
+CMDs[#CMDs + 1] = {NAME = 'afkpanel', DESC = 'Open the AFK mode panel'}
+CMDs[#CMDs + 1] = {NAME = 'fab', DESC = 'Toggle the floating action button'}
+CMDs[#CMDs + 1] = {NAME = 'fabadd [command]', DESC = 'Add a command to the floating button'}
+CMDs[#CMDs + 1] = {NAME = 'fabdel [index]', DESC = 'Remove a floating button command'}
+CMDs[#CMDs + 1] = {NAME = 'fablist', DESC = 'List floating button commands'}
+CMDs[#CMDs + 1] = {NAME = 'fabclear', DESC = 'Clear all floating button commands'}
+CMDs[#CMDs + 1] = {NAME = 'fabpanel', DESC = 'Open the floating button editor'}
+CMDs[#CMDs + 1] = {NAME = 'mobilemode [auto/on/off]', DESC = 'Set mobile UI mode'}
 wait()
 
 for i = 1, #CMDs do
@@ -13088,3 +13163,982 @@ task.spawn(function()
 	minimizeHolder()
 	if table.find({Enum.Platform.IOS, Enum.Platform.Android}, UserInputService:GetPlatform()) then notify("Unstable Device", "On mobile, Infinite Yield may have issues or features that are not functioning correctly.") end
 end)
+
+-- ============================================================================
+-- IY Quick Actions (v5.10.0): quick commands, quick waypoints, AFK mode, the
+-- assignable floating button and mobile UI mode. Self-contained module: all
+-- state is loaded by saves() above, everything here builds UI and registers
+-- chat commands. Globals resolve at call time so this can live at end of file.
+-- ============================================================================
+
+-- ---- state ------------------------------------------------------------------
+afkEnabled = false
+IY_AFKGen = 0
+IY_Mobile = { detected = false, effective = false }
+
+function IY_NormalizeQuickData()
+	if type(quickCmds) ~= "table" then quickCmds = {} end
+	for i = 1, 8 do
+		if type(quickCmds[i]) ~= "string" then quickCmds[i] = "" end
+	end
+	if type(quickWPs) ~= "table" then quickWPs = {} end
+	for i = 1, 6 do
+		if type(quickWPs[i]) ~= "table" then quickWPs[i] = {} end
+	end
+	if type(afkCmds) ~= "table" then afkCmds = {} end
+	if type(fabCmds) ~= "table" then fabCmds = {} end
+	afkInterval = math.clamp(tonumber(afkInterval) or 30, 5, 600)
+	if afkJump == nil then afkJump = true end
+	if fabVisible == nil then fabVisible = true end
+	if mobileMode ~= "on" and mobileMode ~= "off" and mobileMode ~= "auto" then
+		mobileMode = "auto"
+	end
+end
+
+function IY_SaveQuickData()
+	if type(updatesaves) == "function" then pcall(updatesaves) end
+end
+
+function IY_NotifyLines(title, lines)
+	local shown = {}
+	for i = 1, math.min(#lines, 15) do shown[#shown + 1] = lines[i] end
+	if #lines > 15 then shown[#shown + 1] = "... (+" .. (#lines - 15) .. " more)" end
+	local pages = math.max(1, math.ceil(#shown / 4))
+	local m = 0
+	for i = 1, #shown, 4 do
+		m = m + 1
+		local chunk = {}
+		for j = i, math.min(i + 3, #shown) do chunk[#chunk + 1] = shown[j] end
+		local t = title
+		if pages > 1 then t = t .. " (" .. m .. "/" .. pages .. ")" end
+		notify(t, table.concat(chunk, "\n"))
+	end
+end
+
+function IY_EnsureSettingsOpen()
+	if SettingsOpen == false then
+		SettingsOpen = true
+		Settings:TweenPosition(UDim2.new(0, 0, 0, 45), "InOut", "Quart", 0.3, true, nil)
+		CMDsF.Visible = false
+	end
+end
+
+-- ---- floating action button ---------------------------------------------------
+FAB = Instance.new("TextButton")
+FAB.Name = "IY_FAB"
+FAB.Parent = PARENT
+FAB.Active = true
+FAB.BackgroundColor3 = currentShade2
+FAB.BorderSizePixel = 0
+FAB.Position = UDim2.new(0, 20, 0.5, -32)
+FAB.Size = UDim2.new(0, 64, 0, 64)
+FAB.Font = Enum.Font.SourceSansBold
+FAB.TextSize = 22
+FAB.Text = "IY"
+FAB.TextColor3 = currentText1
+FAB.ZIndex = 10
+FAB.AutoButtonColor = true
+FAB.Selectable = true
+FAB.Visible = fabVisible ~= false
+table.insert(shade2, FAB)
+table.insert(text1, FAB)
+IY_AddCorner(FAB, 32)
+IY_AddStroke(FAB, Color3.fromRGB(91, 192, 248), 2, 0.25)
+IY_MakeButtonAccessible(FAB, "Floating quick actions button")
+IY_SetTip(FAB, "Quick actions", "Tap: run assigned commands | Hold: configure")
+IY_RegisterScaledRoot(FAB)
+
+if fabPos ~= nil and type(fabPos) == "table" and #fabPos == 4 then
+	pcall(function()
+		FAB.Position = UDim2.new(fabPos[1], fabPos[2], fabPos[3], fabPos[4])
+	end)
+end
+
+function IY_FABClampAndSave()
+	pcall(function()
+		local cam = workspace.CurrentCamera
+		if cam == nil then return end
+		local vw, vh = cam.ViewportSize.X, cam.ViewportSize.Y
+		local abs = FAB.AbsolutePosition
+		local size = FAB.AbsoluteSize
+		local nx = math.clamp(abs.X, 4, math.max(4, vw - size.X - 4))
+		local ny = math.clamp(abs.Y, 4, math.max(4, vh - size.Y - 4))
+		FAB.Position = UDim2.new(0, nx, 0, ny)
+		fabPos = {0, nx, 0, ny}
+	end)
+	IY_SaveQuickData()
+end
+
+function IY_RunFAB()
+	local count = 0
+	for _, c in ipairs(fabCmds or {}) do
+		if c ~= nil and c ~= "" then
+			count = count + 1
+			pcall(function() execCmd(c, Players.LocalPlayer, true) end)
+		end
+	end
+	if count == 0 then
+		notify("Floating Button", "No commands assigned - hold the button to configure")
+	else
+		notify("Floating Button", "Ran " .. count .. " command" .. (count == 1 and "" or "s"))
+	end
+end
+
+function IY_SetFABVisible(v)
+	fabVisible = v and true or false
+	pcall(function() FAB.Visible = fabVisible end)
+	IY_RefreshFABUI()
+	IY_SaveQuickData()
+end
+
+do
+	local downPos, downTime, dragging, startPos = nil, 0, false, nil
+	FAB.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			downPos = input.Position
+			downTime = tick()
+			dragging = false
+			startPos = FAB.Position
+		end
+	end)
+	FAB.InputChanged:Connect(function(input)
+		if downPos ~= nil and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local dx = input.Position.X - downPos.X
+			local dy = input.Position.Y - downPos.Y
+			if math.abs(dx) + math.abs(dy) > 12 then dragging = true end
+			if dragging and startPos ~= nil then
+				FAB.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + dx, startPos.Y.Scale, startPos.Y.Offset + dy)
+			end
+		end
+	end)
+	FAB.InputEnded:Connect(function(input)
+		if downPos ~= nil and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+			local held = tick() - downTime
+			local wasDrag = dragging
+			downPos = nil
+			dragging = false
+			startPos = nil
+			if wasDrag then
+				IY_FABClampAndSave()
+			elseif held > 0.6 then
+				IY_OpenQuickPanel(FABFrame)
+			else
+				IY_RunFAB()
+			end
+		end
+	end)
+end
+
+-- ---- settings sub-panel builders ----------------------------------------------
+function IY_MakeSubPanel(name)
+	local f = Instance.new("Frame")
+	f.Name = name
+	f.Parent = Settings
+	f.Active = true
+	f.BackgroundColor3 = currentShade1
+	f.BorderSizePixel = 0
+	f.Position = UDim2.new(0, 0, 0, 175)
+	f.Size = UDim2.new(0, 250, 0, 175)
+	f.ZIndex = 10
+	table.insert(shade1, f)
+	return f
+end
+
+function IY_MakePanelLabel(parent, text, x, y, w, h, size)
+	local l = Instance.new("TextLabel")
+	l.Parent = parent
+	l.BackgroundTransparency = 1
+	l.BorderSizePixel = 0
+	l.Position = UDim2.new(0, x, 0, y)
+	l.Size = UDim2.new(0, w, 0, h)
+	l.Font = Enum.Font.SourceSans
+	l.TextSize = size or 14
+	l.Text = text
+	l.TextColor3 = currentText1
+	l.TextXAlignment = Enum.TextXAlignment.Left
+	l.TextTruncate = Enum.TextTruncate.AtEnd
+	l.ZIndex = 10
+	table.insert(text1, l)
+	return l
+end
+
+function IY_MakePanelButton(parent, text, x, y, w, h, primary, noTheme)
+	local b = Instance.new("TextButton")
+	b.Parent = parent
+	if primary then
+		b.BackgroundColor3 = currentShade3
+	else
+		b.BackgroundColor3 = currentShade2
+	end
+	b.BorderSizePixel = 0
+	b.Position = UDim2.new(0, x, 0, y)
+	b.Size = UDim2.new(0, w, 0, h)
+	b.Font = Enum.Font.SourceSans
+	b.TextSize = 14
+	b.Text = text
+	if primary then
+		b.TextColor3 = currentText2
+	else
+		b.TextColor3 = currentText1
+	end
+	b.TextTruncate = Enum.TextTruncate.AtEnd
+	b.ZIndex = 10
+	if noTheme == nil or noTheme == false then
+		if primary then
+			table.insert(shade3, b)
+			table.insert(text2, b)
+		else
+			table.insert(shade2, b)
+			table.insert(text1, b)
+		end
+	end
+	IY_AddCorner(b, 4)
+	IY_MakeButtonAccessible(b, text)
+	return b
+end
+
+function IY_MakePanelBox(parent, placeholder, x, y, w, h)
+	local t = Instance.new("TextBox")
+	t.Parent = parent
+	t.BackgroundColor3 = currentShade2
+	t.BorderSizePixel = 0
+	t.Position = UDim2.new(0, x, 0, y)
+	t.Size = UDim2.new(0, w, 0, h)
+	t.Font = Enum.Font.SourceSans
+	t.TextSize = 14
+	t.Text = ""
+	t.PlaceholderText = placeholder
+	t.PlaceholderColor3 = Color3.fromRGB(175, 175, 180)
+	t.TextColor3 = currentText1
+	t.TextXAlignment = Enum.TextXAlignment.Left
+	t.ClearTextOnFocus = false
+	t.ZIndex = 10
+	table.insert(shade2, t)
+	table.insert(text1, t)
+	IY_AddCorner(t, 4)
+	IY_MakeInputAccessible(t, placeholder)
+	return t
+end
+
+-- Scrolling command list with per-row run + delete. Returns refresh(list, onRun, onDelete).
+function IY_BuildCmdList(parent, y, h, rowH)
+	local holder = Instance.new("ScrollingFrame")
+	holder.Name = "IY_List"
+	holder.Parent = parent
+	holder.BackgroundTransparency = 1
+	holder.BorderSizePixel = 0
+	holder.Position = UDim2.new(0, 0, 0, y)
+	holder.Size = UDim2.new(0, 250, 0, h)
+	holder.ScrollBarImageColor3 = currentScroll
+	holder.BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
+	holder.MidImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
+	holder.TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
+	holder.CanvasSize = UDim2.new(0, 0, 0, 0)
+	holder.ZIndex = 10
+	table.insert(scroll, holder)
+	IY_ApplyScrollA11y(holder, 10)
+	local function refresh(list, onRun, onDelete)
+		for _, c in pairs(holder:GetChildren()) do
+			if c:IsA("TextButton") or c:IsA("TextLabel") then c:Destroy() end
+		end
+		local pitch = rowH + 4
+		if #list == 0 then
+			local empty = IY_MakePanelLabel(holder, "(empty - add one below)", 8, 2, 234, rowH, 14)
+			empty.TextTransparency = 0.35
+		else
+			for i, cmd in ipairs(list) do
+				local idx = i
+				local row = IY_MakePanelButton(holder, tostring(cmd), 5, (i - 1) * pitch + 2, 185, rowH, false)
+				row.TextXAlignment = Enum.TextXAlignment.Left
+				row.MouseButton1Click:Connect(function()
+					if onRun ~= nil then onRun(idx) end
+				end)
+				local del = IY_MakePanelButton(holder, "Del", 195, (i - 1) * pitch + 2, 45, rowH, true)
+				del.MouseButton1Click:Connect(function()
+					if onDelete ~= nil then onDelete(idx) end
+				end)
+			end
+		end
+		holder.CanvasSize = UDim2.new(0, 0, 0, math.max(#list, 1) * pitch + 4)
+	end
+	return refresh
+end
+
+function IY_HideQuickPanels()
+	for _, f in pairs({QuickFrame, QuickWPFrame, AFKFrame, FABFrame}) do
+		if f ~= nil then
+			pcall(function() f:TweenPosition(UDim2.new(0, 0, 0, 175), "InOut", "Quart", 0.3, true, nil) end)
+		end
+	end
+end
+
+function IY_OpenQuickPanel(frame)
+	if frame == nil then return end
+	IY_EnsureSettingsOpen()
+	for _, f in pairs({KeybindsFrame, AliasesFrame, PositionsFrame, PluginsFrame, QuickFrame, QuickWPFrame, AFKFrame, FABFrame}) do
+		if f ~= nil and f ~= frame then
+			pcall(function() f:TweenPosition(UDim2.new(0, 0, 0, 175), "InOut", "Quart", 0.3, true, nil) end)
+		end
+	end
+	pcall(function() SettingsHolder.Visible = false end)
+	frame:TweenPosition(UDim2.new(0, 0, 0, 0), "InOut", "Quart", 0.3, true, nil)
+end
+
+function IY_CloseQuickPanel(frame)
+	if frame == nil then return end
+	pcall(function() SettingsHolder.Visible = true end)
+	frame:TweenPosition(UDim2.new(0, 0, 0, 175), "InOut", "Quart", 0.3, true, nil)
+end
+
+-- ---- quick commands panel -------------------------------------------------------
+QuickFrame = IY_MakeSubPanel("QuickFrame")
+QuickSlotBox = IY_MakePanelBox(QuickFrame, "#", 5, 4, 30, 22)
+QuickCmdBox = IY_MakePanelBox(QuickFrame, "command (e.g. fly)", 40, 4, 145, 22)
+QuickSetBtn = IY_MakePanelButton(QuickFrame, "Set", 190, 4, 50, 22, true)
+QuickHolder = Instance.new("ScrollingFrame")
+QuickHolder.Name = "Holder"
+QuickHolder.Parent = QuickFrame
+QuickHolder.BackgroundTransparency = 1
+QuickHolder.BorderSizePixel = 0
+QuickHolder.Position = UDim2.new(0, 0, 0, 30)
+QuickHolder.Size = UDim2.new(0, 250, 0, 114)
+QuickHolder.ScrollBarImageColor3 = currentScroll
+QuickHolder.BottomImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
+QuickHolder.MidImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
+QuickHolder.TopImage = "rbxasset://textures/ui/Scroll/scroll-middle.png"
+QuickHolder.CanvasSize = UDim2.new(0, 0, 0, 244)
+QuickHolder.ZIndex = 10
+table.insert(scroll, QuickHolder)
+IY_ApplyScrollA11y(QuickHolder, 10)
+IY_MakePanelLabel(QuickFrame, "Tap a command to run it", 5, 146, 195, 24, 14)
+Close_5 = IY_MakePanelButton(QuickFrame, "Close", 205, 146, 40, 24, false)
+
+function IY_RefreshQuickUI()
+	for _, c in pairs(QuickHolder:GetChildren()) do
+		if c:IsA("TextButton") or c:IsA("TextLabel") then c:Destroy() end
+	end
+	for i = 1, 8 do
+		local slot = i
+		local cmd = quickCmds[i] or ""
+		IY_MakePanelLabel(QuickHolder, tostring(i), 5, (i - 1) * 30 + 4, 18, 26, 14)
+		local row = IY_MakePanelButton(QuickHolder, cmd ~= "" and cmd or "(empty)", 26, (i - 1) * 30 + 2, 158, 26, false)
+		row.TextXAlignment = Enum.TextXAlignment.Left
+		if cmd == "" then row.TextTransparency = 0.4 end
+		row.MouseButton1Click:Connect(function() IY_RunQuick(slot) end)
+		local del = IY_MakePanelButton(QuickHolder, "Del", 189, (i - 1) * 30 + 2, 51, 26, true)
+		del.MouseButton1Click:Connect(function()
+			quickCmds[slot] = ""
+			IY_RefreshQuickUI()
+			IY_SaveQuickData()
+		end)
+	end
+	QuickHolder.CanvasSize = UDim2.new(0, 0, 0, 244)
+end
+
+QuickSetBtn.MouseButton1Click:Connect(function()
+	local slot = tonumber(QuickSlotBox.Text)
+	local cmd = tostring(QuickCmdBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+	if slot == nil or slot < 1 or slot > 8 or math.floor(slot) ~= slot then
+		notify("Quick Commands", "Pick a slot number 1-8")
+		return
+	end
+	if cmd == "" then
+		notify("Quick Commands", "Type a command first")
+		return
+	end
+	quickCmds[slot] = cmd
+	QuickSlotBox.Text = ""
+	QuickCmdBox.Text = ""
+	IY_RefreshQuickUI()
+	IY_SaveQuickData()
+	notify("Quick Commands", "Slot " .. slot .. " set to: " .. cmd)
+end)
+Close_5.MouseButton1Click:Connect(function() IY_CloseQuickPanel(QuickFrame) end)
+
+-- ---- quick waypoints panel --------------------------------------------------------
+QuickWPFrame = IY_MakeSubPanel("QuickWPFrame")
+QWPNameLabels = {}
+for i = 1, 6 do
+	local slot = i
+	local y = (i - 1) * 24
+	IY_MakePanelLabel(QuickWPFrame, "Q" .. i, 5, y + 1, 28, 22, 14)
+	local info = IY_MakePanelLabel(QuickWPFrame, "(empty)", 36, y + 1, 104, 22, 14)
+	info.TextTransparency = 0.4
+	QWPNameLabels[i] = info
+	local setB = IY_MakePanelButton(QuickWPFrame, "Set", 143, y, 48, 22, false)
+	setB.MouseButton1Click:Connect(function() IY_SetQuickWP(slot) end)
+	local goB = IY_MakePanelButton(QuickWPFrame, "Go", 196, y, 48, 22, true)
+	goB.MouseButton1Click:Connect(function() IY_GoQuickWP(slot) end)
+end
+IY_MakePanelLabel(QuickWPFrame, "Set saves here - Go teleports", 5, 146, 195, 24, 14)
+Close_6 = IY_MakePanelButton(QuickWPFrame, "Close", 205, 146, 40, 24, false)
+Close_6.MouseButton1Click:Connect(function() IY_CloseQuickPanel(QuickWPFrame) end)
+
+function IY_RefreshQuickWPUI()
+	for i = 1, 6 do
+		local qp = quickWPs[i]
+		local lbl = QWPNameLabels[i]
+		if lbl ~= nil then
+			if qp ~= nil and qp.x ~= nil then
+				lbl.Text = (qp.name or ("Q" .. i)) .. " (" .. tostring(qp.x) .. "," .. tostring(qp.y) .. "," .. tostring(qp.z) .. ")"
+				lbl.TextTransparency = 0
+			else
+				lbl.Text = "(empty)"
+				lbl.TextTransparency = 0.4
+			end
+		end
+	end
+end
+
+-- ---- AFK mode panel -----------------------------------------------------------------
+AFKFrame = IY_MakeSubPanel("AFKFrame")
+AFKStatus = IY_MakePanelLabel(AFKFrame, "Status: OFF", 5, 2, 240, 18, 14)
+IY_RefreshAFKList = IY_BuildCmdList(AFKFrame, 22, 64, 22)
+AFKCmdBox = IY_MakePanelBox(AFKFrame, "command to repeat", 5, 90, 165, 22)
+AFKAddBtn = IY_MakePanelButton(AFKFrame, "Add", 175, 90, 70, 22, true)
+IY_MakePanelLabel(AFKFrame, "Every", 5, 116, 42, 22, 14)
+AFKIntBox = IY_MakePanelBox(AFKFrame, "30", 50, 116, 52, 22)
+IY_MakePanelLabel(AFKFrame, "sec", 106, 116, 30, 22, 14)
+IY_MakePanelLabel(AFKFrame, "Jump", 140, 116, 40, 22, 14)
+AFKJumpBtn = IY_MakePanelButton(AFKFrame, "OFF", 185, 116, 52, 22, false, true)
+AFKToggleBtn = IY_MakePanelButton(AFKFrame, "Start AFK", 5, 146, 90, 24, true)
+AFKClearBtn = IY_MakePanelButton(AFKFrame, "Clear", 100, 146, 60, 24, false)
+Close_7 = IY_MakePanelButton(AFKFrame, "Close", 205, 146, 40, 24, false)
+
+AFKAddBtn.MouseButton1Click:Connect(function()
+	local cmd = tostring(AFKCmdBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+	if cmd == "" then notify("AFK Mode", "Type a command first") return end
+	table.insert(afkCmds, cmd)
+	AFKCmdBox.Text = ""
+	IY_RefreshAFKUI()
+	IY_SaveQuickData()
+end)
+AFKClearBtn.MouseButton1Click:Connect(function()
+	afkCmds = {}
+	IY_RefreshAFKUI()
+	IY_SaveQuickData()
+end)
+AFKJumpBtn.MouseButton1Click:Connect(function()
+	afkJump = not afkJump
+	IY_RefreshAFKUI()
+	IY_SaveQuickData()
+end)
+AFKToggleBtn.MouseButton1Click:Connect(function() IY_SetAFK(not afkEnabled) end)
+AFKIntBox.FocusLost:Connect(function(enter)
+	local v = math.clamp(math.floor(tonumber(AFKIntBox.Text) or afkInterval), 5, 600)
+	afkInterval = v
+	AFKIntBox.Text = tostring(v)
+	IY_RefreshAFKUI()
+	IY_SaveQuickData()
+end)
+Close_7.MouseButton1Click:Connect(function() IY_CloseQuickPanel(AFKFrame) end)
+
+function IY_RefreshAFKUI()
+	local n = 0
+	for _, c in ipairs(afkCmds or {}) do if c ~= nil and c ~= "" then n = n + 1 end end
+	pcall(function()
+		AFKStatus.Text = "Status: " .. (afkEnabled and "ON" or "OFF") .. " - " .. n .. " cmd(s) every " .. tostring(afkInterval) .. "s"
+		AFKToggleBtn.Text = afkEnabled and "Stop AFK" or "Start AFK"
+		AFKIntBox.Text = tostring(afkInterval)
+		AFKButton.ButtonLabel.Text = "AFK Mode: " .. (afkEnabled and "ON" or "OFF")
+	end)
+	IY_SetToggleVisual(AFKJumpBtn, afkJump)
+	if IY_RefreshAFKList ~= nil then
+		IY_RefreshAFKList(afkCmds, function(i)
+			local c = afkCmds[i]
+			if c ~= nil and c ~= "" then pcall(function() execCmd(c, Players.LocalPlayer, true) end) end
+		end, function(i)
+			table.remove(afkCmds, i)
+			IY_RefreshAFKUI()
+			IY_SaveQuickData()
+		end)
+	end
+end
+
+-- ---- floating button editor panel ------------------------------------------------------
+FABFrame = IY_MakeSubPanel("FABFrame")
+do
+	local fabInfo = IY_MakePanelLabel(FABFrame, "Tap the floating button to run these. Hold it to open this panel.", 5, 2, 240, 34, 14)
+	fabInfo.TextWrapped = true
+end
+IY_RefreshFABList = IY_BuildCmdList(FABFrame, 38, 72, 22)
+FABCmdBox = IY_MakePanelBox(FABFrame, "command for the button", 5, 114, 165, 22)
+FABAddBtn = IY_MakePanelButton(FABFrame, "Add", 175, 114, 70, 22, true)
+FABTestBtn = IY_MakePanelButton(FABFrame, "Test Run", 5, 146, 90, 24, true)
+FABVisBtn = IY_MakePanelButton(FABFrame, "Hide", 100, 146, 90, 24, false)
+Close_8 = IY_MakePanelButton(FABFrame, "Close", 205, 146, 40, 24, false)
+
+FABAddBtn.MouseButton1Click:Connect(function()
+	local cmd = tostring(FABCmdBox.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+	if cmd == "" then notify("Floating Button", "Type a command first") return end
+	table.insert(fabCmds, cmd)
+	FABCmdBox.Text = ""
+	IY_RefreshFABUI()
+	IY_SaveQuickData()
+end)
+FABTestBtn.MouseButton1Click:Connect(IY_RunFAB)
+FABVisBtn.MouseButton1Click:Connect(function() IY_SetFABVisible(not fabVisible) end)
+Close_8.MouseButton1Click:Connect(function() IY_CloseQuickPanel(FABFrame) end)
+
+function IY_RefreshFABUI()
+	pcall(function()
+		FABVisBtn.Text = fabVisible and "Hide" or "Show"
+		FABButton.ButtonLabel.Text = "Floating Button: " .. (fabVisible and "On" or "Off")
+		FAB.Visible = fabVisible ~= false
+	end)
+	if IY_RefreshFABList ~= nil then
+		IY_RefreshFABList(fabCmds, function(i)
+			local c = fabCmds[i]
+			if c ~= nil and c ~= "" then pcall(function() execCmd(c, Players.LocalPlayer, true) end) end
+		end, function(i)
+			table.remove(fabCmds, i)
+			IY_RefreshFABUI()
+			IY_SaveQuickData()
+		end)
+	end
+end
+
+-- ---- settings buttons -------------------------------------------------------------------
+SettingsHolder.CanvasSize = UDim2.new(0, 0, 0, 475)
+QuickButton = makeSettingsButton("Quick Commands", "rbxassetid://1204397029")
+QuickButton.Position = UDim2.new(0, 5, 0, 325)
+QuickButton.Size = UDim2.new(1, -10, 0, 25)
+QuickButton.Name = "IY_Quick"
+QuickButton.Parent = SettingsHolder
+QuickWPButton = makeSettingsButton("Quick Waypoints", "rbxassetid://1204397029")
+QuickWPButton.Position = UDim2.new(0, 5, 0, 355)
+QuickWPButton.Size = UDim2.new(1, -10, 0, 25)
+QuickWPButton.Name = "IY_QuickWP"
+QuickWPButton.Parent = SettingsHolder
+AFKButton = makeSettingsButton("AFK Mode: OFF", "rbxassetid://1204397029")
+AFKButton.Position = UDim2.new(0, 5, 0, 385)
+AFKButton.Size = UDim2.new(1, -10, 0, 25)
+AFKButton.Name = "IY_AFK"
+AFKButton.Parent = SettingsHolder
+FABButton = makeSettingsButton("Floating Button: On", "rbxassetid://1204397029")
+FABButton.Position = UDim2.new(0, 5, 0, 415)
+FABButton.Size = UDim2.new(1, -10, 0, 25)
+FABButton.Name = "IY_FAB"
+FABButton.Parent = SettingsHolder
+MobileButton = makeSettingsButton("Mobile Mode: Auto", "rbxassetid://1204397029")
+MobileButton.Position = UDim2.new(0, 5, 0, 445)
+MobileButton.Size = UDim2.new(1, -10, 0, 25)
+MobileButton.Name = "IY_Mobile"
+MobileButton.Parent = SettingsHolder
+
+QuickButton.MouseButton1Click:Connect(function() IY_OpenQuickPanel(QuickFrame) end)
+QuickWPButton.MouseButton1Click:Connect(function() IY_OpenQuickPanel(QuickWPFrame) end)
+AFKButton.MouseButton1Click:Connect(function() IY_OpenQuickPanel(AFKFrame) end)
+FABButton.MouseButton1Click:Connect(function() IY_OpenQuickPanel(FABFrame) end)
+MobileButton.MouseButton1Click:Connect(function()
+	if mobileMode == "auto" then mobileMode = "on"
+	elseif mobileMode == "on" then mobileMode = "off"
+	else mobileMode = "auto" end
+	IY_ApplyMobileMode()
+	IY_SaveQuickData()
+	notify("Mobile Mode", "Mobile mode: " .. mobileMode .. (IY_Mobile.effective and " (active)" or ""))
+end)
+
+for _, b in pairs({Keybinds, Aliases, Positions, Plugins}) do
+	if b ~= nil then
+		pcall(function()
+			b.MouseButton1Click:Connect(function() IY_HideQuickPanels() end)
+		end)
+	end
+end
+
+-- ---- AFK mode ---------------------------------------------------------------------------------
+function IY_SetAFK(on)
+	afkEnabled = on and true or false
+	IY_RefreshAFKUI()
+	if afkEnabled then
+		pcall(function() execCmd("antiafk nonotify", Players.LocalPlayer, false) end)
+		task.spawn(IY_AFKLoop)
+		local n = 0
+		for _, c in ipairs(afkCmds or {}) do if c ~= nil and c ~= "" then n = n + 1 end end
+		notify("AFK Mode", "ON - " .. n .. " command(s) every " .. tostring(afkInterval) .. "s")
+	else
+		notify("AFK Mode", "OFF")
+	end
+	pcall(function()
+		if IY_StatusBar ~= nil then
+			if afkEnabled then
+				IY_StatusBar.Text = "AFK MODE ON - every " .. tostring(afkInterval) .. "s (run " .. tostring(prefix) .. "afk to stop)"
+			else
+				local total = 0
+				for _, v in pairs(CMDsF:GetChildren()) do
+					if v:IsA("TextButton") then total = total + 1 end
+				end
+				IY_UpdateStatusBar(0, total, "")
+			end
+		end
+		if FAB ~= nil then
+			if afkEnabled then
+				FAB.Text = "AFK"
+				FAB.BackgroundColor3 = Color3.fromRGB(43, 122, 64)
+			else
+				FAB.Text = "IY"
+				FAB.BackgroundColor3 = currentShade2
+			end
+		end
+	end)
+end
+
+function IY_AFKLoop()
+	IY_AFKGen = IY_AFKGen + 1
+	local gen = IY_AFKGen
+	while afkEnabled and gen == IY_AFKGen do
+		pcall(function()
+			local VU = game:GetService("VirtualUser")
+			VU:CaptureController()
+			VU:ClickButton2(Vector2.new())
+		end)
+		for _, c in ipairs(afkCmds or {}) do
+			if not (afkEnabled and gen == IY_AFKGen) then break end
+			if c ~= nil and c ~= "" then
+				pcall(function() execCmd(c, Players.LocalPlayer, false) end)
+			end
+		end
+		if afkJump then
+			pcall(function()
+				local ch = Players.LocalPlayer.Character
+				if ch ~= nil then
+					local h = ch:FindFirstChildOfClass("Humanoid")
+					if h ~= nil then h.Jump = true end
+				end
+			end)
+		end
+		local waited = 0
+		while waited < afkInterval and afkEnabled and gen == IY_AFKGen do
+			wait(1)
+			waited = waited + 1
+		end
+	end
+end
+
+-- ---- quick commands / waypoints ---------------------------------------------------------------
+function IY_RunQuick(slot)
+	slot = tonumber(slot)
+	if slot == nil or slot < 1 or slot > 8 then
+		notify("Quick Commands", "Usage: " .. tostring(prefix) .. "quick [1-8]")
+		return
+	end
+	local c = quickCmds[slot]
+	if c == nil or c == "" then
+		notify("Quick Commands", "Slot " .. slot .. " is empty")
+		return
+	end
+	execCmd(c, Players.LocalPlayer, true)
+end
+
+function IY_SetQuickWP(slot, name)
+	slot = tonumber(slot)
+	if slot == nil or slot < 1 or slot > 6 then
+		notify("Quick Waypoints", "Usage: " .. tostring(prefix) .. "sqwp [1-6] [name]")
+		return
+	end
+	local ch = Players.LocalPlayer.Character
+	if ch == nil or getRoot(ch) == nil then
+		notify("Quick Waypoints", "No character found")
+		return
+	end
+	local p = getRoot(ch).Position
+	local old = quickWPs[slot]
+	if (name == nil or name == "") and old ~= nil and old.name ~= nil then name = old.name end
+	if name == nil or name == "" then name = "Q" .. slot end
+	quickWPs[slot] = { name = name, x = math.floor(p.X), y = math.floor(p.Y), z = math.floor(p.Z), game = PlaceId }
+	IY_RefreshQuickWPUI()
+	IY_SaveQuickData()
+	notify("Quick Waypoints", "Saved " .. name .. " (" .. math.floor(p.X) .. "," .. math.floor(p.Y) .. "," .. math.floor(p.Z) .. ")")
+end
+
+function IY_GoQuickWP(slot)
+	slot = tonumber(slot)
+	if slot == nil or slot < 1 or slot > 6 then
+		notify("Quick Waypoints", "Usage: " .. tostring(prefix) .. "qwp [1-6]")
+		return
+	end
+	local qp = quickWPs[slot]
+	if qp == nil or qp.x == nil then
+		notify("Quick Waypoints", "Slot " .. slot .. " is empty - press Set to save here")
+		return
+	end
+	if qp.game ~= nil and qp.game ~= PlaceId then
+		notify("Quick Waypoints", "Slot " .. slot .. " was saved in a different game")
+		return
+	end
+	local ch = Players.LocalPlayer.Character
+	if ch ~= nil and getRoot(ch) ~= nil then
+		getRoot(ch).CFrame = CFrame.new(qp.x, qp.y, qp.z)
+		notify("Quick Waypoints", "Teleported to " .. (qp.name or ("Q" .. slot)))
+	else
+		notify("Quick Waypoints", "No character found")
+	end
+end
+
+-- ---- mobile mode ----------------------------------------------------------------------------------
+function IY_DetectMobile()
+	local touch, small, keyboard = false, false, false
+	pcall(function() touch = UserInputService.TouchEnabled end)
+	pcall(function()
+		local vs = workspace.CurrentCamera.ViewportSize
+		small = math.min(vs.X, vs.Y) < 700
+	end)
+	pcall(function() keyboard = UserInputService.KeyboardEnabled end)
+	IY_Mobile.detected = touch and ((not keyboard) or small)
+end
+
+function IY_RefreshMobileButton()
+	pcall(function()
+		if MobileButton ~= nil and MobileButton.ButtonLabel ~= nil then
+			local label = mobileMode or "auto"
+			label = label:sub(1, 1):upper() .. label:sub(2)
+			MobileButton.ButtonLabel.Text = "Mobile Mode: " .. label
+		end
+	end)
+end
+
+function IY_ApplyMobileMode()
+	IY_DetectMobile()
+	local mode = mobileMode or "auto"
+	IY_Mobile.effective = (mode == "on") or (mode == "auto" and IY_Mobile.detected)
+	local m = IY_Mobile.effective
+	local rowH = m and 34 or 26
+	local fontSize = m and 20 or 18
+	pcall(function()
+		Example.Size = UDim2.new(0, 190, 0, rowH)
+		Example.TextSize = fontSize
+		for _, v in pairs(CMDsF:GetChildren()) do
+			if v:IsA("TextButton") then
+				v.Size = UDim2.new(0, 190, 0, rowH)
+				v.TextSize = fontSize
+			end
+		end
+	end)
+	pcall(function()
+		for _, f in pairs(scroll) do
+			if f ~= nil and f.Parent ~= nil then
+				f.ScrollBarThickness = m and 16 or 12
+			end
+		end
+		for _, f in pairs({QuickHolder, AFKFrame:FindFirstChild("IY_List"), FABFrame:FindFirstChild("IY_List")}) do
+			if f ~= nil and f.Parent ~= nil then f.ScrollBarThickness = 10 end
+		end
+	end)
+	pcall(function()
+		if Text_2 ~= nil then Text_2.TextSize = m and 18 or 16 end
+	end)
+	task.spawn(function()
+		wait()
+		pcall(function()
+			CMDsF.CanvasSize = UDim2.new(0, 0, 0, cmdListLayout.AbsoluteContentSize.Y)
+		end)
+	end)
+	if m and IY_A11y.uiScale < 1.15 then
+		IY_A11y.uiScale = 1.15
+		IY_ApplyUIScale()
+		IY_RefreshA11yButtons()
+	end
+	IY_RefreshMobileButton()
+	local total = 0
+	pcall(function()
+		for _, v in pairs(CMDsF:GetChildren()) do
+			if v:IsA("TextButton") then total = total + 1 end
+		end
+	end)
+	IY_UpdateStatusBar(0, total, "")
+end
+
+-- ---- chat commands ----------------------------------------------------------------------------------
+addcmd('quick', {'q'}, function(args, speaker)
+	IY_RunQuick(args[1])
+end)
+
+addcmd('quickadd', {'qadd'}, function(args, speaker)
+	local slot = tonumber(args[1])
+	local cmd = getstring(2)
+	if slot == nil or slot < 1 or slot > 8 or math.floor(slot) ~= slot then
+		notify("Quick Commands", "Usage: " .. tostring(prefix) .. "quickadd [1-8] [command]")
+		return
+	end
+	if cmd == nil or cmd == "" then
+		notify("Quick Commands", "Type a command to save")
+		return
+	end
+	quickCmds[slot] = cmd
+	IY_RefreshQuickUI()
+	IY_SaveQuickData()
+	notify("Quick Commands", "Slot " .. slot .. " set to: " .. cmd)
+end)
+
+addcmd('quickdel', {'qdel'}, function(args, speaker)
+	local slot = tonumber(args[1])
+	if slot == nil or slot < 1 or slot > 8 then
+		notify("Quick Commands", "Usage: " .. tostring(prefix) .. "quickdel [1-8]")
+		return
+	end
+	quickCmds[slot] = ""
+	IY_RefreshQuickUI()
+	IY_SaveQuickData()
+	notify("Quick Commands", "Slot " .. slot .. " cleared")
+end)
+
+addcmd('quicklist', {'qlist'}, function(args, speaker)
+	local lines = {}
+	for i = 1, 8 do
+		local c = quickCmds[i]
+		table.insert(lines, i .. ": " .. ((c ~= nil and c ~= "") and c or "(empty)"))
+	end
+	IY_NotifyLines("Quick Commands", lines)
+end)
+
+addcmd('quickpanel', {'qp'}, function(args, speaker)
+	IY_OpenQuickPanel(QuickFrame)
+end)
+
+addcmd('qwp', {}, function(args, speaker)
+	IY_GoQuickWP(args[1])
+end)
+
+addcmd('sqwp', {}, function(args, speaker)
+	IY_SetQuickWP(args[1], getstring(2))
+end)
+
+addcmd('qwpanel', {'qwpp'}, function(args, speaker)
+	IY_OpenQuickPanel(QuickWPFrame)
+end)
+
+addcmd('afk', {}, function(args, speaker)
+	IY_SetAFK(not afkEnabled)
+end)
+
+addcmd('afkadd', {}, function(args, speaker)
+	local cmd = getstring(1)
+	if cmd == nil or cmd == "" then
+		notify("AFK Mode", "Usage: " .. tostring(prefix) .. "afkadd [command]")
+		return
+	end
+	table.insert(afkCmds, cmd)
+	IY_RefreshAFKUI()
+	IY_SaveQuickData()
+	notify("AFK Mode", "Added: " .. cmd)
+end)
+
+addcmd('afkdel', {}, function(args, speaker)
+	local idx = tonumber(args[1])
+	if idx == nil or idx < 1 or idx > #afkCmds then
+		notify("AFK Mode", "Usage: " .. tostring(prefix) .. "afkdel [1-" .. #afkCmds .. "]")
+		return
+	end
+	table.remove(afkCmds, idx)
+	IY_RefreshAFKUI()
+	IY_SaveQuickData()
+	notify("AFK Mode", "Removed entry " .. idx)
+end)
+
+addcmd('afklist', {}, function(args, speaker)
+	if #afkCmds == 0 then
+		notify("AFK Mode", "List is empty - use " .. tostring(prefix) .. "afkadd [command]")
+	else
+		local lines = {}
+		for i, c in ipairs(afkCmds) do lines[i] = i .. ": " .. tostring(c) end
+		IY_NotifyLines("AFK Mode (" .. #afkCmds .. ")", lines)
+	end
+end)
+
+addcmd('afkinterval', {}, function(args, speaker)
+	local v = tonumber(args[1])
+	if v == nil then
+		notify("AFK Mode", "Interval is " .. tostring(afkInterval) .. "s (5-600)")
+		return
+	end
+	afkInterval = math.clamp(math.floor(v), 5, 600)
+	IY_RefreshAFKUI()
+	IY_SaveQuickData()
+	notify("AFK Mode", "Interval set to " .. tostring(afkInterval) .. "s")
+end)
+
+addcmd('afkjump', {}, function(args, speaker)
+	afkJump = not afkJump
+	IY_RefreshAFKUI()
+	IY_SaveQuickData()
+	notify("AFK Mode", "Auto-jump " .. (afkJump and "ON" or "OFF"))
+end)
+
+addcmd('afkpanel', {}, function(args, speaker)
+	IY_OpenQuickPanel(AFKFrame)
+end)
+
+addcmd('fab', {}, function(args, speaker)
+	IY_SetFABVisible(not fabVisible)
+	notify("Floating Button", fabVisible and "Visible - drag to move, tap to run, hold to edit" or "Hidden - run " .. tostring(prefix) .. "fab to show")
+end)
+
+addcmd('fabadd', {}, function(args, speaker)
+	local cmd = getstring(1)
+	if cmd == nil or cmd == "" then
+		notify("Floating Button", "Usage: " .. tostring(prefix) .. "fabadd [command]")
+		return
+	end
+	table.insert(fabCmds, cmd)
+	IY_RefreshFABUI()
+	IY_SaveQuickData()
+	notify("Floating Button", "Added: " .. cmd)
+end)
+
+addcmd('fabdel', {}, function(args, speaker)
+	local idx = tonumber(args[1])
+	if idx == nil or idx < 1 or idx > #fabCmds then
+		notify("Floating Button", "Usage: " .. tostring(prefix) .. "fabdel [1-" .. #fabCmds .. "]")
+		return
+	end
+	table.remove(fabCmds, idx)
+	IY_RefreshFABUI()
+	IY_SaveQuickData()
+	notify("Floating Button", "Removed entry " .. idx)
+end)
+
+addcmd('fablist', {}, function(args, speaker)
+	if #fabCmds == 0 then
+		notify("Floating Button", "No commands assigned")
+	else
+		local lines = {}
+		for i, c in ipairs(fabCmds) do lines[i] = i .. ": " .. tostring(c) end
+		IY_NotifyLines("Floating Button (" .. #fabCmds .. ")", lines)
+	end
+end)
+
+addcmd('fabclear', {}, function(args, speaker)
+	fabCmds = {}
+	IY_RefreshFABUI()
+	IY_SaveQuickData()
+	notify("Floating Button", "Cleared")
+end)
+
+addcmd('fabpanel', {}, function(args, speaker)
+	IY_OpenQuickPanel(FABFrame)
+end)
+
+addcmd('mobilemode', {'mobile'}, function(args, speaker)
+	local v = args[1] ~= nil and tostring(args[1]):lower() or ""
+	if v == "auto" or v == "on" or v == "off" then
+		mobileMode = v
+		IY_ApplyMobileMode()
+		IY_SaveQuickData()
+		notify("Mobile Mode", "Mobile mode: " .. v .. (IY_Mobile.effective and " (active)" or ""))
+	else
+		notify("Mobile Mode", "Current: " .. tostring(mobileMode) .. (IY_Mobile.effective and " (active)" or "") .. " - use auto/on/off")
+	end
+end)
+
+-- ---- init -----------------------------------------------------------------------------------------------
+IY_NormalizeQuickData()
+IY_ApplyMobileMode()
+IY_RefreshQuickUI()
+IY_RefreshQuickWPUI()
+IY_RefreshAFKUI()
+IY_RefreshFABUI()
+IY_FABClampAndSave()
+if IY_Mobile.effective then
+	notify("Mobile Mode", "Touch UI active - larger rows, floating button enabled")
+end
